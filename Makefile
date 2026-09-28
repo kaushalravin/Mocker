@@ -1,14 +1,14 @@
 CC = gcc
 
-CFLAGS = -Wall -Wextra -Isrc
+CFLAGS = -Wall -Wextra -Icli/src
 
-TARGET = minidocker
+TARGET = mocker
 
-SRC = src/main.c \
-      src/process/process.c \
-      src/namespace/namespace.c \
-      src/namespace/uts.c \
-	  src/namespace/pid.c 
+SRC = cli/src/main.c \
+      cli/src/process/process.c \
+      cli/src/namespace/namespace.c \
+      cli/src/namespace/uts.c \
+      cli/src/namespace/pid.c
 
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)

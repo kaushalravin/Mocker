@@ -15,11 +15,11 @@ void setup_uts_namespace(){
         exit(EXIT_FAILURE);
     }
 
-    if (sethostname("minidocker", 10) == -1)
+    if (sethostname("mocker", 6) == -1)
     {
         perror("sethostname");
         exit(EXIT_FAILURE);
     }
 
-    printf("UTS: hostname set to minidocker\n");
+    printf("UTS: hostname set to mocker\n");
 }

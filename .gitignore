@@ -1,0 +1,8 @@
+mocker-project-context.md
+OS_Project_Team_Prep.docx
+
+# build artifacts
+mocker
+minidocker
+*.o
+*.out
