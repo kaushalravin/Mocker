@@ -62,6 +62,51 @@ int cgroups_v2_available(void)
     return access("/sys/fs/cgroup/cgroup.controllers", F_OK) == 0;
 }
 
+/* Cgroup limits are plain file I/O - no special syscall needed. */
+static int write_to_path(const char *path, const char *value)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd == -1) {
+        perror(path);
+        return -1;
+    }
+
+    ssize_t len = (ssize_t)strlen(value);
+    if (write(fd, value, len) != len) {
+        perror(path);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+/*
+ * A freshly created cgroup only gets controller interface files
+ * (memory.max, pids.max, cpu.max) if its PARENT has enabled those
+ * controllers for children - cgroups v2 controllers do not propagate down
+ * on their own (see cgroup-v2.rst, "cgroup.subtree_control"). Enable them
+ * once on the shared "mocker" parent so every per-container cgroup under
+ * it picks them up. Re-enabling an already-enabled controller is a no-op,
+ * so this is safe to call every time.
+ */
+static int enable_child_controllers(void)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/cgroup.subtree_control", CGROUP_BASE);
+
+    if (write_to_path(path, "+memory +pids +cpu") == -1) {
+        fprintf(stderr,
+                "cgroups: could not enable controllers on %s - check "
+                "`cat /sys/fs/cgroup/cgroup.controllers` includes memory, pids, cpu\n",
+                CGROUP_BASE);
+        return -1;
+    }
+
+    return 0;
+}
+
 int cgroup_create(const char *name)
 {
     char dir[PATH_MAX];
@@ -82,6 +127,9 @@ int cgroup_create(const char *name)
         perror("mkdir " CGROUP_BASE);
         return -1;
     }
+
+    if (enable_child_controllers() == -1)
+        return -1;
 
     if (mkdir(dir, 0755) == -1) {
         perror(dir);
@@ -105,22 +153,7 @@ int cgroup_write_file(const char *name, const char *file, const char *value)
         return -1;
     }
 
-    /* Cgroup limits are plain file I/O - no special syscall needed. */
-    int fd = open(path, O_WRONLY);
-    if (fd == -1) {
-        perror(path);
-        return -1;
-    }
-
-    ssize_t len = (ssize_t)strlen(value);
-    if (write(fd, value, len) != len) {
-        perror(path);
-        close(fd);
-        return -1;
-    }
-
-    close(fd);
-    return 0;
+    return write_to_path(path, value);
 }
 
 static long read_cgroup_file_long(const char *name, const char *file)
