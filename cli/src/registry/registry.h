@@ -16,7 +16,7 @@
  * section 1. This is bookkeeping only (name -> pid, paths, status); it is
  * never the source of truth for whether a container is actually isolated or
  * limited (per CLAUDE.md section 10) - that's always re-derived from
- * /proc/<pid>/* and /sys/fs/cgroup/mocker/<name>/* at read time.
+ * /proc/<pid>/[files] and /sys/fs/cgroup/mocker/<name>/[files] at read time.
  */
 typedef struct {
     const char *name;
