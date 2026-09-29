@@ -6,29 +6,50 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include "cgroups/cgroups.h"
+#include "network/net_setup.h"
 #include "process/process.h"
 #include "registry/registry.h"
 
 /*
  * Stage 4 ("Combine", see CLAUDE.md section 6 / docs/architecture.md): the
- * real `mocker run` CLI. Namespaces + pivot_root (stage 3) and cgroups
- * (stage 2) are wired together here, in the order docs/architecture.md
- * section 3 specifies - cgroup created and limited *before* the container
- * is spawned, PID attached to it *immediately* after clone() returns, and
- * only then a registry entry recorded.
+ * real `mocker run` CLI. Namespaces + pivot_root (stage 3), cgroups
+ * (stage 2), and networking (stage 5) are wired together here, in the order
+ * docs/architecture.md section 3/7 specifies - cgroup created and limited
+ * *before* the container is spawned, PID attached to it *immediately* after
+ * clone() returns, host-side veth wired the same way, and only then a
+ * registry entry recorded.
  *
  * Usage: mocker run --name <name> [--mem-mb <n>] [--pids <n>]
- *                    [--cpu-percent <n>] <rootfs-path> -- <cmd> [args...]
+ *                    [--cpu-percent <n>] [--port <hostport>:<containerport>]
+ *                    <rootfs-path> -- <cmd> [args...]
  */
 
 static void print_usage(const char *prog)
 {
     fprintf(stderr,
             "usage: %s run --name <name> [--mem-mb <n>] [--pids <n>] "
-            "[--cpu-percent <n>] <rootfs-path> -- <cmd> [args...]\n",
+            "[--cpu-percent <n>] [--port <hostport>:<containerport>] "
+            "<rootfs-path> -- <cmd> [args...]\n",
             prog);
+}
+
+/* Parses "hostport:containerport", or exits with a usage-style error. Both
+ * ports must be in the valid TCP port range. */
+static void parse_port_map(const char *value, int *host_port_out, int *container_port_out)
+{
+    int host_port, container_port;
+    if (sscanf(value, "%d:%d", &host_port, &container_port) != 2 ||
+        host_port < 1 || host_port > 65535 || container_port < 1 || container_port > 65535) {
+        fprintf(stderr,
+                "mocker: --port expects <hostport>:<containerport> (1-65535), got '%s'\n",
+                value);
+        exit(EXIT_FAILURE);
+    }
+    *host_port_out = host_port;
+    *container_port_out = container_port;
 }
 
 /* Parses one non-negative CLI integer, or exits with a usage-style error -
@@ -51,6 +72,8 @@ static int cmd_run(int argc, char *argv[])
     long mem_mb = -1;
     long pids_max = -1;
     long cpu_percent = -1;
+    int host_port = -1;
+    int container_port = -1;
 
     int i = 2;
     for (; i < argc && strncmp(argv[i], "--", 2) == 0 && strcmp(argv[i], "--") != 0; i++) {
@@ -62,6 +85,8 @@ static int cmd_run(int argc, char *argv[])
             pids_max = parse_positive_long("--pids", argv[++i]);
         } else if (strcmp(argv[i], "--cpu-percent") == 0 && i + 1 < argc) {
             cpu_percent = parse_positive_long("--cpu-percent", argv[++i]);
+        } else if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+            parse_port_map(argv[++i], &host_port, &container_port);
         } else {
             fprintf(stderr, "mocker: unrecognized or malformed flag '%s'\n", argv[i]);
             print_usage(argv[0]);
@@ -127,10 +152,30 @@ static int cmd_run(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    printf("MOCKER: starting container '%s' (rootfs=%s)...\n", name, rootfs_path);
+    /* Bridge/NAT are shared, host-wide state - ensured once up front, same
+     * as cgroups v2 being checked before any per-container work starts. */
+    if (net_bridge_ensure() == -1) {
+        cgroup_remove(name);
+        return EXIT_FAILURE;
+    }
+
+    char container_ip[32];
+    if (net_alloc_ip(name, container_ip, sizeof(container_ip)) == -1) {
+        cgroup_remove(name);
+        return EXIT_FAILURE;
+    }
+
+    char host_veth[NET_IFNAME_MAX];
+    char peer_veth[NET_IFNAME_MAX];
+    net_veth_names(name, host_veth, peer_veth);
+
+    printf("MOCKER: starting container '%s' (rootfs=%s, ip=%s)...\n", name, rootfs_path,
+           container_ip);
     fflush(stdout);
 
-    pid_t pid = create_process(rootfs_path, name, cmd_argv);
+    int net_ready_fd;
+    pid_t pid = create_process(rootfs_path, name, cmd_argv, peer_veth, container_ip,
+                                &net_ready_fd);
 
     printf("MOCKER: container '%s' host PID = %d\n", name, pid);
     fflush(stdout);
@@ -141,10 +186,40 @@ static int cmd_run(int argc, char *argv[])
      * rather than allowed to continue outside the cgroup. */
     if (cgroup_attach(name, pid) == -1) {
         fprintf(stderr, "mocker: failed to attach PID %d to cgroup, killing container\n", pid);
+        close(net_ready_fd);
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);
         cgroup_remove(name);
         return EXIT_FAILURE;
+    }
+
+    /* Host-side veth wiring - same "before the container gets far" timing as
+     * cgroup_attach() above. The container's PID 1 is still blocked reading
+     * net_ready_fd at this point, so it can't race this. On failure the
+     * container must not be left running half-networked, so it's killed. */
+    if (net_veth_setup(host_veth, peer_veth, pid) == -1) {
+        fprintf(stderr, "mocker: failed to wire networking for '%s', killing container\n", name);
+        close(net_ready_fd);
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+        cgroup_remove(name);
+        return EXIT_FAILURE;
+    }
+
+    /* Releases the container's PID 1, blocked since clone(), to configure
+     * peer_veth (now renamed/moved into its netns) and continue into
+     * pivot_root()/execvp() - see docs/architecture.md section 7. */
+    if (write(net_ready_fd, "x", 1) != 1)
+        perror("net_ready_fd write");
+    close(net_ready_fd);
+
+    if (host_port != -1) {
+        /* Non-fatal: port mapping is an additive convenience, not part of
+         * the container's core isolation, so a failure here shouldn't kill
+         * an otherwise-running container. */
+        if (net_port_map(container_ip, host_port, container_port) == -1)
+            fprintf(stderr, "mocker: warning: port mapping %d:%d failed\n", host_port,
+                    container_port);
     }
 
     registry_entry_t entry = {
@@ -152,6 +227,7 @@ static int cmd_run(int argc, char *argv[])
         .pid = pid,
         .rootfs_path = rootfs_path,
         .cgroup_path = cgroup_path,
+        .ip = container_ip,
         .status = "running",
     };
     registry_write(&entry);

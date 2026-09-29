@@ -23,6 +23,7 @@ typedef struct {
     pid_t pid;
     const char *rootfs_path;
     const char *cgroup_path;
+    const char *ip; /* "a.b.c.d", stage 5 - see docs/architecture.md section 7 */
     const char *status; /* "running" or "exited" */
 } registry_entry_t;
 

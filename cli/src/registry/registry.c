@@ -89,10 +89,11 @@ int registry_write(const registry_entry_t *entry)
             "  \"pid\": %d,\n"
             "  \"rootfs\": \"%s\",\n"
             "  \"cgroup\": \"%s\",\n"
+            "  \"ip\": \"%s\",\n"
             "  \"status\": \"%s\"\n"
             "}\n",
             entry->name, (int)entry->pid, entry->rootfs_path, entry->cgroup_path,
-            entry->status);
+            entry->ip, entry->status);
 
     fclose(f);
     return 0;

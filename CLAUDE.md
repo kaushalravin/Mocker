@@ -25,10 +25,22 @@ of a hardcoded string. Verified end-to-end on the VM with a BusyBox rootfs (appl
 **hardlinks**, not symlinks — `busybox --install -s` breaks after `pivot_root` since the symlink
 target is an absolute host path; see `cli/README.md`): hostname, `/`, and `getpid()` all correctly
 reflect the container's namespaces from inside a live `/bin/sh`, and `memory.max`/`pids.max` and
-`state.json` match what was requested. `mocker rm`/`stop`/`ps`/`inspect`/`logs`/`exec` are not
-built yet — cgroup and registry cleanup after a container exits is deliberately left for
-`mocker rm` (`docs/architecture.md` section 5), not implemented inline. Update this file as real
-structure and decisions land.
+`state.json` match what was requested. Stage 5 (networking) is implemented but **not yet verified
+on Linux**: `cli/src/network/net_setup.c` (bridge `mocker0` + NAT setup, `flock()`-guarded IP
+leasing from `10.200.0.0/24`, veth pair creation/naming, container-side interface configuration,
+`--port` DNAT/FORWARD rules — all via `fork()`+`execvp()` of `ip`/`iptables`, never
+`system()`/`popen()`) is linked into the main binary; `clone()` in `cli/src/namespace/namespace.c`
+now also carries `CLONE_NEWNET`, with a `pipe()`-based handshake so the container's PID 1 blocks
+until the parent has moved its veth peer into its network namespace and wired the host side, then
+configures `eth0` itself before `pivot_root()`; `main.c` gained a `--port <hostport>:<containerport>`
+flag and now allocates/wires networking around the existing cgroup-attach step, killing the
+container on a host-side wiring failure the same way a cgroup-attach failure is already handled.
+`registry.c`'s `state.json` now also records the container's leased IP. See
+`docs/architecture.md` section 7 for the full design. `mocker rm`/`stop`/`ps`/`inspect`/`logs`/`exec`
+are not built yet — cgroup, registry, and now network cleanup (bridge left up, host-side veth stub,
+iptables rules, lease entry) after a container exits are all deliberately left for `mocker rm`
+(`docs/architecture.md` section 5), not implemented inline. Update this file as real structure and
+decisions land.
 
 ## 2. Academic objective
 
@@ -62,13 +74,14 @@ restructure blindly once code exists:
 Mocker/                       # repo root
 ├── cli/
 │   ├── src/
-│   │   ├── namespace/        # namespace.c (single-clone dispatcher), uts.c
+│   │   ├── namespace/        # namespace.c (single-clone dispatcher, now +CLONE_NEWNET), uts.c
 │   │   ├── mount/            # mount_setup.c (pivot_root sequence)
 │   │   ├── cgroups/          # cgroups.c/.h (linked into mocker) + standalone cgroups_test.c
 │   │   ├── process/          # launch/wait wrapper around namespace.c
-│   │   ├── registry/         # registry.c/.h (per-container state.json)
-│   │   ├── main.c            # the real `mocker run` CLI (stage 4)
-│   │   # not yet split out: net_setup.c, proc_launch.c
+│   │   ├── registry/         # registry.c/.h (per-container state.json, now +ip field)
+│   │   ├── network/          # net_setup.c/.h (bridge/veth/IP-lease/port-map, stage 5)
+│   │   ├── main.c            # the real `mocker run` CLI (stage 4 "Combine", now stage 5-aware)
+│   │   # not yet split out: proc_launch.c
 │   └── README.md
 ├── mockerhost/
 │   ├── clone_and_build.*     # not started

@@ -11,10 +11,12 @@ Everything Mocker owns on the host lives under one controlled root:
 
 ```
 /var/lib/mocker/
-└── containers/
-    └── <name>/
-        ├── rootfs/       # this container's root filesystem (pivot_root target)
-        └── state.json    # registry entry: pid, cgroup path, rootfs path, status
+├── containers/
+│   └── <name>/
+│       ├── rootfs/       # this container's root filesystem (pivot_root target)
+│       └── state.json    # registry entry: pid, cgroup path, rootfs path, ip, status
+└── network/
+    └── leases            # flat "<name> <ip>" lease file, flock()-guarded (stage 5, section 7)
 ```
 
 `/sys/fs/cgroup/mocker/<name>/` is the matching cgroup directory (kernel-mandated location,
@@ -146,3 +148,127 @@ cleanup, no "best effort" deletion.
 
 `mocker rm`/`prune` themselves are **not** built at stage 3 — only the primitives they'll need
 (§5 stays a design until its own stage).
+
+## 7. Network lifecycle (stage 5)
+
+Every container gets its own network namespace (`CLONE_NEWNET`, joining the flag set in `clone()`
+alongside PID/mount/UTS — §2), wired to the host through a veth pair and a shared Linux bridge, so
+containers can reach each other and the outside world, and the host can reach into a container
+through a mapped port.
+
+### Implementation choice: shell out to `ip`/`iptables`, not raw netlink
+
+`CLONE_NEWNET` itself — the actual namespace-creation syscall — is hand-rolled, same as
+PID/mount/UTS. Configuring what's *inside* that namespace (create the veth pair, move one end into
+it, assign IPs, add routes, set up NAT) is done by `fork()`+`execvp()`-ing the host's `ip` and
+`iptables` binaries rather than hand-rolling `AF_NETLINK`/`NETLINK_ROUTE` messages
+(`RTM_NEWLINK`/`RTM_NEWADDR`/`RTM_NEWROUTE`/etc.) directly. This was an explicit, discussed
+trade-off (not a default): raw rtnetlink is real additional C for every operation below, and the
+concept being demonstrated at the OS level is namespace isolation (`CLONE_NEWNET`), not netlink
+socket programming — `ip`/`iptables` are still doing the exact same syscalls under the hood, just
+via a subprocess instead of an in-process socket. Every `ip`/`iptables` invocation below is run
+through one small helper (`net_run(argv[])` in `net_setup.c`) that `fork()`s, `execvp()`s, and
+`waitpid()`s, checking the exit status — never `system()`/`popen()` (same shell-injection concern
+`filesystem-safety.md` calls out for deletion commands applies here: arguments are built from
+already-validated names/IPs, never interpolated into a shell string).
+
+### Bridge
+
+One shared bridge, `mocker0`, created lazily and idempotently the first time `mocker run` needs it
+(`ip link show mocker0` first; only `ip link add ... type bridge` if absent — never assume no other
+container has run yet):
+
+```
+ip link add mocker0 type bridge
+ip addr add 10.200.0.1/24 dev mocker0
+ip link set mocker0 up
+sysctl -w net.ipv4.ip_forward=1          # HOST COMMAND - host-wide, needed once
+iptables -t nat -A POSTROUTING -s 10.200.0.0/24 ! -o mocker0 -j MASQUERADE   # outbound NAT, added
+                                                                              # only if an
+                                                                              # equivalent -C check
+                                                                              # doesn't already
+                                                                              # find it
+```
+
+10.200.0.0/24 is chosen specifically to be unlikely to collide with a typical home/VM NAT range
+(192.168.x.x, 172.x). `mocker0` at `10.200.0.1` is every container's default gateway.
+
+### Per-container IP allocation
+
+No full IPAM — a flat lease file at `MOCKER_ROOT "/network/leases"` (one `<name> <ip>` line per
+container, append-only, `flock()`-guarded around the read-modify-write so two concurrent
+`mocker run`s can't pick the same address). Allocation scans existing leases for used last-octets
+and picks the lowest free one in `[2, 254]`. This is bookkeeping only, same caveat as the
+`state.json` registry (§1) — it is not re-derived from kernel state, so a manually-deleted lease
+file entry could in principle cause a reused IP. Documented limitation, not solved now (cleanup as
+a whole is `mocker rm`'s job, §5, not built yet).
+
+### Per-container veth pair
+
+Host-side and peer interface names must fit `IFNAMSIZ` (16 bytes, 15 usable) even though container
+names can be up to 64 characters, so names are derived, not used verbatim:
+`v<first-6-chars-of-name><4-hex-digit-djb2-hash>` (host end) and the same with a `p` prefix (peer,
+temporary — see below). This keeps names traceable to the container while bounding length; two
+container names sharing both their first 6 characters *and* colliding on the hash could in theory
+collide, a known, accepted limitation at this scope (avoid near-identical long names in testing).
+
+Sequence, run from the parent (`mocker run`) right after `clone()` returns — symmetric with
+"attach to the cgroup before the container does anything expensive" (§3 point 4), same reasoning
+applies to networking: the container must not run for long with no network config half-applied:
+
+```
+ip link add <hostveth> type veth peer name <peerveth>
+ip link set <peerveth> netns <pid>       # moves the peer end into the container's netns
+ip link set <hostveth> master mocker0
+ip link set <hostveth> up
+```
+
+### Synchronization: parent must finish before the child configures its side
+
+The child creates its own network namespace at `clone()` time (empty: only `lo`, down). It cannot
+rename/configure the peer interface until the parent has moved it in via the steps above, which
+need the child's PID — so there's a real ordering dependency across two processes. This is handled
+with a pipe created before `clone()`: the child blocks reading one byte right after printing that
+PID 1 is alive, *before* touching hostname/`pivot_root`; the parent writes one byte only after the
+veth-move-and-bridge-attach sequence above has fully succeeded. This is the one place in the
+codebase where parent and child must be explicitly synchronized rather than just racing safely (the
+cgroup attach doesn't need this — writing `cgroup.procs` needs no child cooperation).
+
+Container-side config runs from inside the child, *before* `pivot_root` — deliberately, because the
+child's mount namespace is still a private copy of the host's mount table at that point (§4: only
+`pivot_root` itself switches the visible filesystem), so `execvp("ip", ...)` inside the child still
+finds the host's real `/sbin/ip` even though the eventual container rootfs (a bare BusyBox image)
+has no `iproute2` of its own. No `setns()` needed either way — the child is *already* running inside
+its own net namespace since `clone()` created it there directly:
+
+```
+ip link set <peerveth> name eth0
+ip addr add <container-ip>/24 dev eth0
+ip link set eth0 up
+ip link set lo up
+ip route add default via 10.200.0.1
+```
+
+### Port mapping
+
+Optional `--port <hostport>:<containerport>` on `mocker run`. Implemented as DNAT, added once the
+container's IP is known — both chains are needed because `PREROUTING` only sees packets arriving
+from outside the host, not ones a process on the host itself originates (e.g. `curl
+localhost:<hostport>` from the VM's own shell), which needs `OUTPUT` too:
+
+```
+iptables -t nat -A PREROUTING -p tcp --dport <hostport> -j DNAT --to-destination <ip>:<containerport>
+iptables -t nat -A OUTPUT     -p tcp --dport <hostport> -j DNAT --to-destination <ip>:<containerport>
+iptables -A FORWARD -p tcp -d <ip> --dport <containerport> -j ACCEPT
+```
+
+### What is deliberately not built at stage 5
+
+`mocker rm`/`stop` still don't exist (§5 stays a design). That means the bridge, per-container
+veth's host end, iptables NAT/DNAT rules, and the leases file entry are all left in place after a
+container exits — the exact same "cleanup is later, not improvised inline" posture already taken
+for the cgroup directory and registry entry in stage 4. A container's own veth *peer* end is
+reclaimed automatically by the kernel when its network namespace is destroyed (the container process
+exits and nothing else holds that namespace open), which also detaches the peer from `mocker0` on
+the host side — but the host-side veth stub, the iptables rules, and the lease all persist until
+`mocker rm` exists.
