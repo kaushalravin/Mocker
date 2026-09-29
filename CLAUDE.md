@@ -51,7 +51,21 @@ copies or owns; `ps`/`inspect` always re-derive liveness from `/proc/<pid>`, nev
 stored `status` string alone (CLAUDE.md section 10). `registry.c`/`.h` gained `registry_read()`/
 `registry_list()`/`registry_remove()` and `host_port`/`container_port` fields on the registry entry;
 `net_setup.c`/`.h` gained `net_release_ip()`/`net_veth_delete()`/`net_port_unmap()`. `mocker
-logs`/`exec` are not built yet. Update this file as real structure and
+logs`/`exec` are not built yet. Stage 6 (`mockerhost`, per `docs/mockerhost-design.md`) is now
+**written but not yet built or run on the Lubuntu VM** — `mockerhost/src/server.c` is a raw-socket
+HTTP server (serves `mockerhost/static/index.html`'s deploy form, handles `POST /deploy` by
+validating fields and `fork()`+`execvp()`-ing `mockerhost/clone_and_build.sh` via `/bin/sh`, never a
+host shell string built from user input); `clone_and_build.sh` leases a host port
+(`flock()`-guarded, `/var/lib/mockerhost/ports/leases`), `git clone --depth 1`s into
+`/var/lib/mockerhost/apps/<name>/src`, launches `./mocker run ... -- sh -c "$build_cmd &&
+$run_cmd"` in the background, polls for `state.json`, and writes/reloads an nginx `location` block
+under `/var/lib/mockerhost/nginx/apps/<name>.conf` (one-time site template at
+`mockerhost/nginx/mockerhost.conf`). Deploy-only (no teardown command yet), local-network-only
+(path-based routing at `http://<vm-ip>/apps/<name>/`, no public DNS/TLS), no terminal/exec from the
+web UI (deferred — no user namespace yet, see section 5). Build target added to the top-level
+`Makefile` (`mockerhost/mockerhost-server`, independent of `cli/src/*.c`). See
+`mockerhost/README.md` for setup/build/run and `docs/mockerhost-design.md` for the full design,
+including the shell-injection-safety reasoning in its section 5. Update this file as real structure and
 decisions land.
 
 ## 2. Academic objective
@@ -66,8 +80,9 @@ hiding them behind abstractions — the implementation *is* the demonstration.
 
 - **mocker** — the core C runtime/CLI. Creates and manages namespaced, cgroup-limited processes
   ("containers"). This is where the academic weight lives.
-- **mockerhost** — later-stage product layer: clone a GitHub repo, build it, invoke `mocker run`,
-  front it with a reverse proxy. Deferred until the core runtime works.
+- **mockerhost** — product layer on top of `mocker`: a web form takes a GitHub repo URL + build/run
+  commands, clones and builds it, invokes `mocker run`, and fronts it with nginx. Stage 6, now
+  written (not yet VM-verified) — see section 1 and `docs/mockerhost-design.md`.
 - **demo** — small intentionally-misbehaving programs (`leak.c`, `forkbomb.c`) and a demo app, used
   to prove isolation/limits actually hold (e.g. a forkbomb inside a container must not take down
   the host, `pids.max` must cap it).
@@ -96,16 +111,18 @@ Mocker/                       # repo root
 │   │   # not yet split out: proc_launch.c
 │   └── README.md
 ├── mockerhost/
-│   ├── clone_and_build.*     # not started
-│   ├── proxy_config/
-│   ├── server.*
+│   ├── src/server.c          # raw-socket HTTP server: serves the form, handles POST /deploy
+│   ├── static/index.html     # the deploy form (github url, build cmd, run cmd, container port)
+│   ├── clone_and_build.sh    # clone + mocker run + nginx registration, invoked by server.c
+│   ├── nginx/mockerhost.conf # one-time nginx site template
 │   └── README.md
 ├── demo/
 │   ├── leak.c                # not started
 │   ├── forkbomb.c
 │   └── demo-app/
 ├── docs/
-├── Makefile                  # top-level, builds cli/src/* -> ./mocker
+│   └── mockerhost-design.md  # stage 6 design (scope, request flow, shell-injection safety)
+├── Makefile                  # top-level, builds cli/src/* -> ./mocker, mockerhost/src/server.c -> mockerhost/mockerhost-server
 ├── CLAUDE.md
 └── README.md
 ```

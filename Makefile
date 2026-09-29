@@ -20,11 +20,20 @@ CGROUP_TEST_TARGET = cgroup-test
 CGROUP_TEST_SRC = cli/src/cgroups/cgroups.c \
                   cli/src/cgroups/cgroups_test.c
 
+# mockerhost's control-plane HTTP server - independent binary, independent of
+# cli/src/*.c; it talks to ./mocker only via its CLI (mockerhost/README.md).
+MOCKERHOST_TARGET = mockerhost/mockerhost-server
+
+MOCKERHOST_SRC = mockerhost/src/server.c
+
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)
 
 $(CGROUP_TEST_TARGET): $(CGROUP_TEST_SRC)
 	$(CC) $(CFLAGS) $(CGROUP_TEST_SRC) -o $(CGROUP_TEST_TARGET)
 
+$(MOCKERHOST_TARGET): $(MOCKERHOST_SRC)
+	$(CC) $(CFLAGS) $(MOCKERHOST_SRC) -o $(MOCKERHOST_TARGET)
+
 clean:
-	rm -f $(TARGET) $(CGROUP_TEST_TARGET)
+	rm -f $(TARGET) $(CGROUP_TEST_TARGET) $(MOCKERHOST_TARGET)
