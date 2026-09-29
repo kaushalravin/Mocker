@@ -47,14 +47,29 @@ own controlled directory:
 /var/lib/mockerhost/
 ├── apps/
 │   └── <name>/
-│       ├── src/        # git clone target
-│       └── build.log   # clone + mocker run's own stdout/stderr, kept out of the control channel
+│       ├── rootfs/      # private copy of $MOCKERHOST_BASE_ROOTFS for this deploy (cp -a),
+│       │   └── app/     #   with the git clone target at rootfs/app - this is what
+│       │                #   mocker run pivot_root()s into, so /app is reachable
+│       │                #   from inside the container
+│       └── build.log    # rootfs copy + clone + mocker run's own stdout/stderr,
+│                         #   kept out of the control channel
 ├── ports/
 │   └── leases           # flat "<port> <name>" file, flock()-guarded, same pattern as
 │                         # mocker's net_alloc_ip() (architecture.md §7)
 └── nginx/apps/
     └── <name>.conf       # one `location` block per deployed app (§6)
 ```
+
+**Why a private rootfs copy per deploy, not the shared base rootfs directly:** `mocker run`
+`pivot_root()`s straight into whatever path it's given — it doesn't copy or mount anything into it.
+If every deploy passed `$MOCKERHOST_BASE_ROOTFS` verbatim, (a) concurrent containers would all be
+writing into the literal same host directory, and (b) the cloned repo — sitting under
+`/var/lib/mockerhost/apps/<name>/`, unrelated to the base rootfs — would be completely unreachable
+from inside the container once `pivot_root()` detaches the old root. Each deploy therefore gets its
+own full copy of the base rootfs (plain `cp -a`, not OverlayFS — `CLAUDE.md` §5 rules that out
+anyway), with the repo cloned to `<copy>/app`, so `cd /app` inside the container's own `sh -c`
+lands exactly on the cloned source. Costs one full copy of the toolchain rootfs per deploy — fine
+at this project's scale, called out under §7 limitations.
 
 ## 4. Request flow (`POST /deploy`)
 
@@ -76,12 +91,14 @@ own controlled directory:
 4. `clone_and_build.sh`:
    - Leases a free host port from `/var/lib/mockerhost/ports/leases` (`[20000, 21000]`, `flock()`
      read-modify-write, same shape as `net_alloc_ip()`).
-   - `git clone --depth 1 "$github_url" .../src`, output redirected to `build.log` — **not** to the
-     script's own stdout, which is reserved for one final structured line (see §5).
-   - Launches `./mocker run --name "$name" --port "$hostport:$containerport" ... "$rootfs" -- sh -c
-     "$build_cmd && $run_cmd"` **in the background** (`&`, `disown`) — `mocker run` blocks for the
-     container's whole lifetime, and the deployed app is meant to keep running after the HTTP
-     response goes back to the browser, not exit when the script does.
+   - `cp -a "$MOCKERHOST_BASE_ROOTFS" .../rootfs` — a private rootfs copy for this deploy (see §3
+     for why this has to be a copy, not the shared base path).
+   - `git clone --depth 1 "$github_url" .../rootfs/app`, output redirected to `build.log` — **not**
+     to the script's own stdout, which is reserved for one final structured line (see §5).
+   - Launches `./mocker run --name "$name" --port "$hostport:$containerport" ... .../rootfs -- sh -c
+     "cd /app && $build_cmd && $run_cmd"` **in the background** (`&`, `disown`) — `mocker run`
+     blocks for the container's whole lifetime, and the deployed app is meant to keep running after
+     the HTTP response goes back to the browser, not exit when the script does.
    - Polls for `/var/lib/mocker/containers/<name>/state.json` to appear (confirms `mocker run`
      actually got the container up), releasing the port lease and reporting failure if it times out.
    - Writes `/var/lib/mockerhost/nginx/apps/<name>.conf` (one `location` block, §6) and reloads
@@ -98,7 +115,7 @@ shell code exactly once, and it happens inside the container, not on the host.**
 `clone_and_build.sh` writes the container launch as one line, with both variables double-quoted:
 
 ```sh
-./mocker run --name "$name" --port "$hostport:$containerport" ... "$rootfs" -- sh -c "$build_cmd && $run_cmd" &
+./mocker run --name "$name" --port "$hostport:$containerport" ... "$app_rootfs" -- sh -c "cd /app && $build_cmd && $run_cmd" &
 ```
 
 Because `"$build_cmd"` and `"$run_cmd"` are quoted, bash expands each into exactly one literal
@@ -131,12 +148,14 @@ works for anyone on the network with no extra setup.
 
 ## 7. Known limitations (state these, don't hide them)
 
-- No teardown flow yet — ports, nginx config files, and cloned source trees accumulate until removed
-  by hand.
-- The base rootfs used for `mocker run` needs whatever language runtime a given app requires
-  (node/python/etc.) already installed in it — `mockerhost` does not assemble a rootfs per app,
-  same precondition `cli/README.md` already documents for `mocker run` itself. One rootfs, one
-  toolchain, configured once via `MOCKERHOST_BASE_ROOTFS`.
+- No teardown flow yet — ports, nginx config files, and per-deploy rootfs copies accumulate until
+  removed by hand.
+- The base rootfs pointed to by `MOCKERHOST_BASE_ROOTFS` needs whatever language runtime a given
+  app requires (node/python/etc.) already installed in it — `mockerhost` copies that template
+  per deploy (§3), it doesn't assemble one from scratch. One template, one toolchain.
+- Each deploy costs a full `cp -a` of the base rootfs — fine at demo scale, but not something that
+  scales to many concurrent deploys or a large toolchain image without disk/time cost becoming
+  noticeable.
 - "The container's `state.json` appeared" is confirmation `mocker run` started the container, **not**
   confirmation the app inside finished building and is actually listening yet — a slow `npm install`
   can mean the returned URL 502s for a while before the app comes up.

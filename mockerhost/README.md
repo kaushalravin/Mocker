@@ -33,11 +33,15 @@ mockerhost/
 
 - `./mocker` already built at the repo root (`make` from the repo root) — `mockerhost`
   is purely a consumer of the `mocker` CLI, never linked against its internals.
-- A base rootfs with whatever language runtime your apps need already installed
-  (node, python, etc.) — `mockerhost` does not assemble a rootfs per app. Point
-  `MOCKERHOST_BASE_ROOTFS` at it, or leave it unset to default to `/root/test-rootfs`
-  (see [../cli/README.md](../cli/README.md) for how to build one with BusyBox as a
-  minimal starting point — a real app will need more than BusyBox in it).
+- A base rootfs *template* with whatever language runtime your apps need already
+  installed (node, python, etc.). `mockerhost` copies this whole directory (`cp -a`,
+  not a mount) into a private rootfs per deploy — see
+  [../docs/mockerhost-design.md](../docs/mockerhost-design.md) section 3 for why —
+  so point `MOCKERHOST_BASE_ROOTFS` at it, or leave it unset to default to
+  `/root/test-rootfs`. See [../cli/README.md](../cli/README.md) for how to build a
+  minimal BusyBox one; BusyBox alone is enough for the smoke test below, but a real
+  app (`npm install`, `pip install`, ...) needs the actual runtime present too.
+  Leave enough disk headroom for one full copy of this template per deploy.
 - `nginx` and `git` installed (`sudo apt-get install -y nginx git`).
 - `flock` (part of `util-linux`, already on any standard Ubuntu install).
 
@@ -79,6 +83,23 @@ listens on inside the container. On success you get back a link at
 `http://<vm-ip>/apps/<name>/` (port 80, through nginx — not port 8080, which is
 only the control-plane form).
 
+## Quick smoke test (no language runtime needed)
+
+The plain BusyBox `test-rootfs` from [../cli/README.md](../cli/README.md) already
+includes an `httpd` applet, which is enough to exercise the whole pipeline (port
+leasing, per-deploy rootfs copy, clone, `mocker run`, nginx registration) without
+installing a real toolchain first. In the form, use:
+
+- **GitHub repo URL**: any small public repo, e.g. `https://github.com/octocat/Hello-World`
+- **Build command**: `true`
+- **Run command**: `busybox httpd -f -p 8000 -h .`
+- **Container port**: `8000`
+
+(`cd /app` already happens for you before these run, so `-h .` serves the cloned
+repo's own files.) A working deploy means `http://<vm-ip>/apps/<name>/` serves
+that repo's files — confirms the mechanism end-to-end before pointing
+`MOCKERHOST_BASE_ROOTFS` at a rootfs with node/python/etc. for a real app.
+
 ## Security notes
 
 - `server.c` never builds a host shell command from form input — it validates
@@ -100,10 +121,13 @@ only the control-plane form).
 
 ## Known limitations
 
-- No teardown flow — ports, nginx config files, and cloned source trees
+- No teardown flow — ports, nginx config files, and per-deploy rootfs copies
   accumulate until removed by hand (`mocker stop`/`mocker rm`, then delete the
   app's directory under `/var/lib/mockerhost/apps/` and its nginx config under
   `/var/lib/mockerhost/nginx/apps/`, then `nginx -s reload`).
+- Each deploy costs a full `cp -a` of the base rootfs template — fine for a demo,
+  not something that scales to many concurrent deploys or a large toolchain image
+  without the copy itself becoming slow / eating disk.
 - A deployed app's `state.json` appearing confirms `mocker run` started the
   container, not that the app inside has finished building and is listening yet
   — a slow install step can mean the returned URL 502s for a while first. Check

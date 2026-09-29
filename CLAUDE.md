@@ -56,10 +56,13 @@ logs`/`exec` are not built yet. Stage 6 (`mockerhost`, per `docs/mockerhost-desi
 HTTP server (serves `mockerhost/static/index.html`'s deploy form, handles `POST /deploy` by
 validating fields and `fork()`+`execvp()`-ing `mockerhost/clone_and_build.sh` via `/bin/sh`, never a
 host shell string built from user input); `clone_and_build.sh` leases a host port
-(`flock()`-guarded, `/var/lib/mockerhost/ports/leases`), `git clone --depth 1`s into
-`/var/lib/mockerhost/apps/<name>/src`, launches `./mocker run ... -- sh -c "$build_cmd &&
-$run_cmd"` in the background, polls for `state.json`, and writes/reloads an nginx `location` block
-under `/var/lib/mockerhost/nginx/apps/<name>.conf` (one-time site template at
+(`flock()`-guarded, `/var/lib/mockerhost/ports/leases`), gives the deploy its own private rootfs
+via `cp -a "$MOCKERHOST_BASE_ROOTFS" .../rootfs` (never the shared template path directly - `mocker
+run` `pivot_root()`s straight into whatever it's given, so a shared path would both collide across
+concurrent deploys and leave the cloned repo unreachable once `pivot_root()` detaches the old root),
+`git clone --depth 1`s into `.../rootfs/app`, launches `./mocker run ... -- sh -c "cd /app &&
+$build_cmd && $run_cmd"` in the background, polls for `state.json`, and writes/reloads an nginx
+`location` block under `/var/lib/mockerhost/nginx/apps/<name>.conf` (one-time site template at
 `mockerhost/nginx/mockerhost.conf`). Deploy-only (no teardown command yet), local-network-only
 (path-based routing at `http://<vm-ip>/apps/<name>/`, no public DNS/TLS), no terminal/exec from the
 web UI (deferred — no user namespace yet, see section 5). Build target added to the top-level

@@ -38,6 +38,7 @@ PORT_RANGE_END=21000
 STATE_TIMEOUT_S=10
 
 APP_DIR="$MOCKERHOST_ROOT/apps/$NAME"
+APP_ROOTFS="$APP_DIR/rootfs"
 LOG_FILE="$APP_DIR/build.log"
 LEASES_FILE="$MOCKERHOST_ROOT/ports/leases"
 
@@ -90,16 +91,25 @@ if [ -z "$HOST_PORT" ]; then
     fail "no_free_host_port_in_range"
 fi
 
-# --- clone --------------------------------------------------------------------
-if [ -e "$APP_DIR/src" ]; then
+# --- give this app its own private rootfs -------------------------------------
+# $BASE_ROOTFS is only a template - mocker run pivot_root()s directly into
+# whatever rootfs path it's given, so if every deploy shared $BASE_ROOTFS
+# verbatim, concurrent containers would be writing into the exact same host
+# directory (and the cloned repo would never be reachable inside any of them,
+# since it's cloned to $MOCKERHOST_ROOT which is unrelated to $BASE_ROOTFS -
+# after pivot_root the container can't see it at all). Instead, each deploy
+# gets its own full copy of the base rootfs (plain `cp -a`, not OverlayFS -
+# CLAUDE.md section 5), with the repo cloned to <rootfs-copy>/app, so `cd
+# /app` inside the container lands exactly on the cloned source.
+if [ -e "$APP_ROOTFS" ]; then
     # Prefix-verify before removing anything, per docs/filesystem-safety.md's
     # rule applied to mockerhost's own state too - $APP_DIR is built entirely
     # from MOCKERHOST_ROOT and $NAME (already validated by server.c against
     # mocker's own ^[a-zA-Z0-9_-]{1,64}$ before this script is ever invoked),
     # never from unvalidated raw input.
-    resolved_src="$(realpath "$APP_DIR/src" 2>/dev/null || echo "")"
-    case "$resolved_src" in
-        "$MOCKERHOST_ROOT"/apps/*) rm -rf "$APP_DIR/src" ;;
+    resolved_rootfs="$(realpath "$APP_ROOTFS" 2>/dev/null || echo "")"
+    case "$resolved_rootfs" in
+        "$MOCKERHOST_ROOT"/apps/*) rm -rf "$APP_ROOTFS" ;;
         *)
             release_port
             fail "refusing_to_reuse_unexpected_app_dir"
@@ -107,7 +117,14 @@ if [ -e "$APP_DIR/src" ]; then
     esac
 fi
 
-if ! git clone --depth 1 "$GITHUB_URL" "$APP_DIR/src" > "$LOG_FILE" 2>&1; then
+: > "$LOG_FILE"
+
+if ! cp -a "$BASE_ROOTFS" "$APP_ROOTFS" >> "$LOG_FILE" 2>&1; then
+    release_port
+    fail "rootfs_copy_failed_see_${LOG_FILE}"
+fi
+
+if ! git clone --depth 1 "$GITHUB_URL" "$APP_ROOTFS/app" >> "$LOG_FILE" 2>&1; then
     release_port
     fail "git_clone_failed_see_${LOG_FILE}"
 fi
@@ -116,11 +133,12 @@ fi
 # ./mocker run blocks for the container's whole lifetime (it's the foreground
 # supervisor - docs/architecture.md section 2) - background it so this script
 # can register the proxy and return, while the deployed app keeps running.
+# Run from mockerhost/'s own cwd (not repo root) - $MOCKER_BIN is "../mocker"
+# relative to here; $APP_ROOTFS is already an absolute path either way.
 (
-    cd .. || exit 1
     "$MOCKER_BIN" run --name "$NAME" --mem-mb 512 --pids 256 \
         --port "$HOST_PORT:$CONTAINER_PORT" \
-        "$BASE_ROOTFS" -- sh -c "$BUILD_CMD && $RUN_CMD" \
+        "$APP_ROOTFS" -- sh -c "cd /app && $BUILD_CMD && $RUN_CMD" \
         >> "$LOG_FILE" 2>&1
 ) &
 disown
