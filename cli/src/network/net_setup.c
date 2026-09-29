@@ -315,6 +315,108 @@ int net_container_configure(const char *peer_veth, const char *ip)
     return 0;
 }
 
+int net_release_ip(const char *name)
+{
+    if (!is_valid_name(name)) {
+        fprintf(stderr, "net: invalid container name '%s'\n", name ? name : "(null)");
+        return -1;
+    }
+
+    int fd = open(NET_LEASES_FILE, O_RDWR);
+    if (fd == -1) {
+        if (errno == ENOENT)
+            return 0; /* nothing was ever leased - nothing to release */
+        perror(NET_LEASES_FILE);
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX) == -1) {
+        perror(NET_LEASES_FILE);
+        close(fd);
+        return -1;
+    }
+
+    FILE *f = fdopen(fd, "r+");
+    if (f == NULL) {
+        perror(NET_LEASES_FILE);
+        close(fd);
+        return -1;
+    }
+
+    /* Bounded by the /24 subnet's own capacity (net_alloc_ip() only ever
+     * hands out octets 2-254), so a fixed-size table is enough - same
+     * reasoning as net_alloc_ip()'s used[255] array. */
+    char kept_lines[255][128];
+    int kept = 0;
+
+    char line[128];
+    while (fgets(line, sizeof(line), f) != NULL) {
+        char lease_name[REGISTRY_NAME_MAX];
+        if (sscanf(line, "%64s", lease_name) == 1 && strcmp(lease_name, name) == 0)
+            continue; /* drop this container's lease */
+        if (kept < 255)
+            snprintf(kept_lines[kept++], sizeof(kept_lines[0]), "%s", line);
+    }
+
+    /* Rewriting the whole file from scratch is the simplest correct way to
+     * drop one line, under the same lock net_alloc_ip() reads/writes under. */
+    if (ftruncate(fileno(f), 0) == -1) {
+        perror(NET_LEASES_FILE);
+        fclose(f);
+        return -1;
+    }
+    fseek(f, 0, SEEK_SET);
+    for (int i = 0; i < kept; i++)
+        fputs(kept_lines[i], f);
+    fflush(f);
+
+    fclose(f); /* also releases the flock() and closes the underlying fd */
+    return 0;
+}
+
+int net_veth_delete(const char *host_veth)
+{
+    if (if_nametoindex(host_veth) == 0)
+        return 0; /* already gone - idempotent, same posture as net_bridge_ensure() */
+
+    char *del_argv[] = {"ip", "link", "delete", (char *)host_veth, NULL};
+    return net_run(del_argv);
+}
+
+int net_port_unmap(const char *container_ip, int host_port, int container_port)
+{
+    char host_port_buf[16];
+    char container_port_buf[16];
+    snprintf(host_port_buf, sizeof(host_port_buf), "%d", host_port);
+    snprintf(container_port_buf, sizeof(container_port_buf), "%d", container_port);
+
+    char dest[64];
+    snprintf(dest, sizeof(dest), "%s:%d", container_ip, container_port);
+
+    /* Try to remove all three rules even if one is already gone/fails, so a
+     * partial `-A` (e.g. run died mid-setup) doesn't block the rest of rm. */
+    int ret = 0;
+
+    char *pre_argv[] = {"iptables", "-t",      "nat",           "-D",   "PREROUTING",
+                         "-p",       "tcp",     "--dport",       host_port_buf,
+                         "-j",       "DNAT",    "--to-destination", dest, NULL};
+    if (net_run(pre_argv) == -1)
+        ret = -1;
+
+    char *out_argv[] = {"iptables", "-t",      "nat",           "-D",   "OUTPUT",
+                         "-p",       "tcp",     "--dport",       host_port_buf,
+                         "-j",       "DNAT",    "--to-destination", dest, NULL};
+    if (net_run(out_argv) == -1)
+        ret = -1;
+
+    char *fwd_argv[] = {"iptables", "-D", "FORWARD", "-p", "tcp", "-d", (char *)container_ip,
+                         "--dport",  container_port_buf, "-j", "ACCEPT", NULL};
+    if (net_run(fwd_argv) == -1)
+        ret = -1;
+
+    return ret;
+}
+
 int net_port_map(const char *container_ip, int host_port, int container_port)
 {
     char host_port_buf[16];

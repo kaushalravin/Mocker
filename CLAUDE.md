@@ -25,8 +25,8 @@ of a hardcoded string. Verified end-to-end on the VM with a BusyBox rootfs (appl
 **hardlinks**, not symlinks — `busybox --install -s` breaks after `pivot_root` since the symlink
 target is an absolute host path; see `cli/README.md`): hostname, `/`, and `getpid()` all correctly
 reflect the container's namespaces from inside a live `/bin/sh`, and `memory.max`/`pids.max` and
-`state.json` match what was requested. Stage 5 (networking) is implemented but **not yet verified
-on Linux**: `cli/src/network/net_setup.c` (bridge `mocker0` + NAT setup, `flock()`-guarded IP
+`state.json` match what was requested. Stage 5 (networking) is also done and verified on the
+Lubuntu VM: `cli/src/network/net_setup.c` (bridge `mocker0` + NAT setup, `flock()`-guarded IP
 leasing from `10.200.0.0/24`, veth pair creation/naming, container-side interface configuration,
 `--port` DNAT/FORWARD rules — all via `fork()`+`execvp()` of `ip`/`iptables`, never
 `system()`/`popen()`) is linked into the main binary; `clone()` in `cli/src/namespace/namespace.c`
@@ -35,11 +35,22 @@ until the parent has moved its veth peer into its network namespace and wired th
 configures `eth0` itself before `pivot_root()`; `main.c` gained a `--port <hostport>:<containerport>`
 flag and now allocates/wires networking around the existing cgroup-attach step, killing the
 container on a host-side wiring failure the same way a cgroup-attach failure is already handled.
-`registry.c`'s `state.json` now also records the container's leased IP. See
-`docs/architecture.md` section 7 for the full design. `mocker rm`/`stop`/`ps`/`inspect`/`logs`/`exec`
-are not built yet — cgroup, registry, and now network cleanup (bridge left up, host-side veth stub,
-iptables rules, lease entry) after a container exits are all deliberately left for `mocker rm`
-(`docs/architecture.md` section 5), not implemented inline. Update this file as real structure and
+`registry.c`'s `state.json` now also records the container's leased IP. Verified end-to-end on the
+VM: `eth0` inside the container carries its leased `10.200.0.x/24` address with a default route via
+the bridge, `ping` to the gateway succeeds, `/proc/<pid>/ns/net` resolves to a namespace distinct
+from the host's, `mocker0`/host-side veth/iptables NAT+DNAT rules all show up in kernel-visible
+state on the host, and a port mapped with `--port` was reachable end-to-end with `curl`. See
+`docs/architecture.md` section 7 for the full design. `mocker stop`/`rm`/`ps`/`inspect` are now
+implemented (`cli/src/main.c`, per `docs/architecture.md` sections 5 and 8) but **not yet verified
+on the Lubuntu VM** — written in this Windows session with no Linux toolchain available, so treat as
+untested until confirmed there. `stop` sends `SIGTERM` then escalates to `SIGKILL` after a 5s
+timeout (PID-namespace-init signal immunity, section 8); `rm` refuses a still-running container and
+only cleans up cgroup/veth/port-rules/IP-lease/registry state — never the rootfs, which Mocker never
+copies or owns; `ps`/`inspect` always re-derive liveness from `/proc/<pid>`, never trusting the
+stored `status` string alone (CLAUDE.md section 10). `registry.c`/`.h` gained `registry_read()`/
+`registry_list()`/`registry_remove()` and `host_port`/`container_port` fields on the registry entry;
+`net_setup.c`/`.h` gained `net_release_ip()`/`net_veth_delete()`/`net_port_unmap()`. `mocker
+logs`/`exec` are not built yet. Update this file as real structure and
 decisions land.
 
 ## 2. Academic objective

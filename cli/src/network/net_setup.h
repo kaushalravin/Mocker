@@ -65,4 +65,27 @@ int net_container_configure(const char *peer_veth, const char *ip);
  */
 int net_port_map(const char *container_ip, int host_port, int container_port);
 
+/*
+ * `mocker rm`'s network cleanup (docs/architecture.md section 5) - the
+ * release/delete counterparts to net_alloc_ip()/net_veth_setup()/net_port_map()
+ * above. Each is idempotent: safe to call on state that's already gone
+ * (nothing leased, interface already deleted, rule already absent), since rm
+ * should still make forward progress on a container whose networking was
+ * only partly set up (e.g. `run` died before finishing).
+ */
+
+/* Removes <name>'s line from MOCKER_ROOT "/network/leases", same
+ * flock()-guarded read-modify-write pattern as net_alloc_ip(). */
+int net_release_ip(const char *name);
+
+/* `ip link delete host_veth`. The peer end doesn't need a separate delete -
+ * it lives inside the container's network namespace, which the kernel tears
+ * down automatically once that namespace's last process exits. */
+int net_veth_delete(const char *host_veth);
+
+/* Removes the exact PREROUTING/OUTPUT/FORWARD rules net_port_map() added,
+ * via `-D` with identical arguments. Only meaningful for a container that
+ * was actually started with --port - the caller checks that first. */
+int net_port_unmap(const char *container_ip, int host_port, int container_port);
+
 #endif

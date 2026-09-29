@@ -112,29 +112,49 @@ After step 5, `/` in this namespace **is** the container's rootfs — there is n
 the container back to the host's real root. The sequence above never calls `rm -rf` anywhere;
 every step is `mount()`/`umount2()`/`mkdir()`/`rmdir()`/`chdir()`/`pivot_root()`, per CLAUDE.md §9.
 
-## 5. `mocker rm` design (designed now, implemented later)
+## 5. `mocker rm` design
 
 CLAUDE.md §9 explicitly forbids implementing `rm`/`prune` until the cleanup lifecycle is designed
-and reviewed. This is that design; stage 3+ implements it, not before.
+and reviewed. This is that design.
 
-Preconditions: only valid on a container that is stopped (process exited, cgroup has no attached
-processes).
+**Correction to the original stage-1 version of this section:** it assumed Mocker copies the
+rootfs into `/var/lib/mocker/containers/<name>/rootfs/` and that `rm` deletes that copy. That was
+never implemented — `mocker run` (stage 4) takes `<rootfs-path>` as a CLI argument, `realpath()`s
+it, and `pivot_root()`s straight into it; Mocker never copies or takes ownership of it. Per
+[filesystem-safety.md](filesystem-safety.md)'s rule that nothing gets recursively deleted unless
+it's verified Mocker-owned, **`mocker rm` never touches the rootfs path at all.** It only cleans up
+state Mocker itself created: the cgroup, the network state added in stage 5, and the registry
+entry. If Mocker ever starts owning a copy of the rootfs, this section gets revised again before
+that deletion is implemented — not before.
 
-1. Look up `<name>` in the registry. If it doesn't exist, error — nothing to do.
-2. Resolve the container's rootfs path with `realpath()` and verify it starts with the
-   `/var/lib/mocker/containers/` prefix *and* is a subdirectory of it (not equal to the prefix
-   itself). Refuse — fail closed — if the resolved path is `/`, or any of `/etc`, `/home`, `/usr`,
-   `/var`, `/boot`, or doesn't match the expected prefix at all. See
-   [filesystem-safety.md](filesystem-safety.md) for the exact check.
-3. Recursively remove the rootfs directory by walking it with `openat()`/directory-fd calls and
-   `unlinkat()`/`rmdir()` on each entry — never a shelled-out `rm -rf`. Every entry is `lstat()`'d
-   before acting on it; a symlink is unlinked as itself and **never followed** into whatever it
-   points at.
-4. `rmdir()` the (now-empty) `/sys/fs/cgroup/mocker/<name>` directory.
-5. Delete the registry entry (`state.json` and the now-empty `<name>/` directory itself).
+Preconditions: only valid on a container that is not running. "Not running" is re-derived from the
+kernel at `rm` time, not trusted from `state.json`'s `status` field (CLAUDE.md §10) — check whether
+`/proc/<pid>` (the PID recorded in the registry) still exists. If it does, refuse and tell the user
+to `mocker stop` first.
 
-If any step fails validation, the whole operation aborts before touching anything — no partial
-cleanup, no "best effort" deletion.
+1. Look up `<name>` in the registry (`registry_read()`). If it doesn't exist, error — nothing to do.
+2. Verify `/proc/<pid>` does not exist. If it does, abort — refuse to remove a running container.
+3. `rmdir()` `/sys/fs/cgroup/mocker/<name>` (`cgroup_remove()`, already implemented — the kernel
+   itself refuses with `EBUSY` if any process is still attached, which is a second, independent
+   check on top of step 2).
+4. Delete the host-side veth end: `ip link delete <host_veth>` (name re-derived deterministically
+   from `<name>` via `net_veth_names()`, not stored — nothing to look up). The container-side peer
+   is already gone; it lived inside the container's network namespace, which the kernel tears down
+   automatically once the container's last process in it exits. Idempotent: if the interface
+   doesn't exist, treat that as already-clean, not an error.
+5. If the registry entry recorded a `--port` mapping (stage 5 added `host_port`/`container_port`
+   fields to `registry_entry_t` for exactly this), remove the three iptables rules `net_port_map()`
+   added, using `-D` with the identical arguments `-A` was called with. If no port mapping was
+   recorded, skip this step.
+6. Release the container's IP lease: delete its line from `MOCKER_ROOT "/network/leases"`
+   (`net_release_ip()`, same `flock()`-guarded read-modify-write pattern as `net_alloc_ip()`).
+7. Delete the registry entry: `unlink()` `state.json`, then `rmdir()` the now-empty
+   `<name>/` directory under `MOCKER_ROOT "/containers/"`. This *is* a Mocker-owned path under
+   `MOCKER_ROOT`, so the normal prefix-verification rule in filesystem-safety.md applies here (even
+   though there's no recursive walk needed — it's always exactly one file then one empty dir).
+
+If any step fails, the whole operation aborts and reports what it got through — no partial "best
+effort" cleanup that silently continues past a failure it can't explain.
 
 ## 6. What stage 3 actually changes in `cli/src/`
 
@@ -262,13 +282,66 @@ iptables -t nat -A OUTPUT     -p tcp --dport <hostport> -j DNAT --to-destination
 iptables -A FORWARD -p tcp -d <ip> --dport <containerport> -j ACCEPT
 ```
 
-### What is deliberately not built at stage 5
+### Cleanup
 
-`mocker rm`/`stop` still don't exist (§5 stays a design). That means the bridge, per-container
-veth's host end, iptables NAT/DNAT rules, and the leases file entry are all left in place after a
-container exits — the exact same "cleanup is later, not improvised inline" posture already taken
-for the cgroup directory and registry entry in stage 4. A container's own veth *peer* end is
-reclaimed automatically by the kernel when its network namespace is destroyed (the container process
-exits and nothing else holds that namespace open), which also detaches the peer from `mocker0` on
-the host side — but the host-side veth stub, the iptables rules, and the lease all persist until
-`mocker rm` exists.
+`mocker run` on its own still leaves everything in place after a container exits — the bridge,
+per-container veth's host end, iptables NAT/DNAT rules, and the leases file entry. A container's own
+veth *peer* end is reclaimed automatically by the kernel when its network namespace is destroyed (the
+container process exits and nothing else holds that namespace open), which also detaches the peer
+from `mocker0` on the host side — but the host-side veth stub, the iptables rules, and the lease all
+persist until `mocker rm` is run against that container. See §8 for `mocker rm`'s full design (§5 has
+the non-network half: cgroup and registry cleanup).
+
+## 8. `mocker stop` / `mocker ps` / `mocker inspect` design
+
+Designed together with §5 since `rm` depends on `stop` having run first, and `ps`/`inspect` share
+the same "registry is bookkeeping, kernel is truth" posture as everything else (CLAUDE.md §10).
+
+### `mocker stop <name>`
+
+1. Look up `<name>` in the registry; error if missing.
+2. Send `SIGTERM` to the registered PID.
+3. Poll `/proc/<pid>` for up to a short fixed timeout (e.g. 5s); if the process is still alive
+   after that, send `SIGKILL`.
+4. Update `state.json`'s `status` to `"exited"`.
+
+Step 3's escalation isn't paranoia — it's required. The registered PID is PID 1 *inside its own PID
+namespace* (per stage 3's design), and Linux gives the init process of a namespace the same
+signal-disposition immunity real init has: a signal whose default action is "terminate" (`SIGTERM`
+included) is **not delivered** unless that process installed a handler for it. Most shells/programs
+don't install a `SIGTERM` handler, so `SIGTERM` alone will often do nothing and `stop` would hang
+forever without the `SIGKILL` fallback. (This is the same reason real Docker's `docker stop` has a
+grace-period-then-`SIGKILL` design — it's not a Mocker-specific quirk, it's how PID-namespace init
+processes behave.)
+
+Note this means `mocker run`'s own foreground `waitpid()` is what actually reaps the process once
+it exits — `run` stays attached and blocked in `wait_for_process()` for the container's whole
+lifetime (this already works today; nothing about `run` needs to change for `stop` to work against
+it from a second shell).
+
+### `mocker rm <name>`'s network cleanup
+
+The network half of §5's cleanup sequence (steps 4-6 there): delete the host-side veth
+(`net_veth_delete()`, `ip link delete <host_veth>`, idempotent if already gone), remove the exact
+`--port` iptables rules if one was recorded (`net_port_unmap()`, `-D` with the same arguments
+`net_port_map()` used to `-A` them), and release the IP lease (`net_release_ip()`, same
+`flock()`-guarded read-modify-write pattern as `net_alloc_ip()`). The bridge (`mocker0`) itself is
+shared, host-wide state — never torn down by removing one container, the same way it's only ever
+created once, lazily, by `net_bridge_ensure()`.
+
+### `mocker ps`
+
+Lists every container under `MOCKER_ROOT "/containers/"`. For each, `registry_read()`s its
+`state.json`, then re-derives whether it's actually still running by checking `/proc/<pid>` right
+now — the displayed status is never just the stored `status` string, since that can go stale (a
+container that was `kill -9`'d outside Mocker entirely would still say `"running"` in `state.json`
+forever otherwise).
+
+### `mocker inspect <name>`
+
+Prints the registry entry (`registry_read()`) plus, for a still-running container, live
+kernel-derived state: `/proc/<pid>/ns/{pid,mnt,uts,net}` (via `readlink()`, to show the actual
+namespace identifiers, not just "yes it has namespaces"), and current cgroup usage
+(`cgroup_get_memory_current()` / `cgroup_get_pids_current()`, both already implemented). Same
+principle as `ps`: what's re-derivable from the kernel is re-derived, not read back out of
+`state.json`.

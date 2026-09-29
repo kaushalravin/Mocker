@@ -32,8 +32,23 @@ static void print_usage(const char *prog)
     fprintf(stderr,
             "usage: %s run --name <name> [--mem-mb <n>] [--pids <n>] "
             "[--cpu-percent <n>] [--port <hostport>:<containerport>] "
-            "<rootfs-path> -- <cmd> [args...]\n",
-            prog);
+            "<rootfs-path> -- <cmd> [args...]\n"
+            "       %s stop <name>\n"
+            "       %s rm <name>\n"
+            "       %s ps\n"
+            "       %s inspect <name>\n",
+            prog, prog, prog, prog, prog);
+}
+
+/* Kernel-truth liveness check (CLAUDE.md section 10 / docs/architecture.md
+ * section 8): whether /proc/<pid> exists right now, never the stored
+ * state.json status string, which can go stale (e.g. a container killed
+ * outside Mocker entirely). */
+static int process_alive(pid_t pid)
+{
+    char proc_path[32];
+    snprintf(proc_path, sizeof(proc_path), "/proc/%d", (int)pid);
+    return access(proc_path, F_OK) == 0;
 }
 
 /* Parses "hostport:containerport", or exits with a usage-style error. Both
@@ -229,6 +244,8 @@ static int cmd_run(int argc, char *argv[])
         .cgroup_path = cgroup_path,
         .ip = container_ip,
         .status = "running",
+        .host_port = host_port,
+        .container_port = container_port,
     };
     registry_write(&entry);
 
@@ -237,22 +254,268 @@ static int cmd_run(int argc, char *argv[])
     entry.status = "exited";
     registry_write(&entry);
 
-    /* Cleanup (cgroup rmdir, registry entry, rootfs) is `mocker rm`'s job -
-     * deliberately not implemented yet, see docs/architecture.md section 5
-     * and CLAUDE.md section 9. Both are left in place here on purpose. */
-    printf("MOCKER: container '%s' done (cgroup and registry entry left in "
-           "place - cleanup is `mocker rm`, not yet implemented).\n",
-           name);
+    /* Cleanup (cgroup rmdir, veth, port rules, IP lease, registry entry) is
+     * `mocker rm`'s job (docs/architecture.md section 5) - left in place here
+     * on purpose so a second shell can still `mocker inspect`/`ps` this
+     * container's final state after it exits. */
+    printf("MOCKER: container '%s' done (state left in place - run `mocker "
+           "rm %s` to clean up).\n",
+           name, name);
+
+    return EXIT_SUCCESS;
+}
+
+static registry_entry_t entry_from_record(const registry_record_t *rec)
+{
+    registry_entry_t entry = {
+        .name = rec->name,
+        .pid = rec->pid,
+        .rootfs_path = rec->rootfs_path,
+        .cgroup_path = rec->cgroup_path,
+        .ip = rec->ip,
+        .status = rec->status,
+        .host_port = rec->host_port,
+        .container_port = rec->container_port,
+    };
+    return entry;
+}
+
+static int cmd_stop(int argc, char *argv[])
+{
+    if (argc != 3) {
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    const char *name = argv[2];
+
+    registry_record_t rec;
+    if (registry_read(name, &rec) == -1) {
+        fprintf(stderr, "mocker: no such container '%s'\n", name);
+        return EXIT_FAILURE;
+    }
+
+    if (!process_alive(rec.pid)) {
+        printf("mocker: '%s' is not running\n", name);
+        return EXIT_SUCCESS;
+    }
+
+    /* SIGTERM first, then escalate to SIGKILL after a timeout - not
+     * optional. The registered pid is PID 1 *inside its own PID namespace*
+     * (stage 3), and Linux gives a namespace's init the same
+     * signal-disposition immunity real init has: SIGTERM's default
+     * "terminate" action is not delivered unless the process installed a
+     * handler for it. Most shells don't, so SIGTERM alone would often hang
+     * forever - see docs/architecture.md section 8. */
+    printf("MOCKER: sending SIGTERM to '%s' (pid %d)...\n", name, (int)rec.pid);
+    fflush(stdout);
+    kill(rec.pid, SIGTERM);
+
+    const int timeout_ms = 5000;
+    const int poll_ms = 200;
+    int waited_ms = 0;
+    while (waited_ms < timeout_ms && process_alive(rec.pid)) {
+        usleep(poll_ms * 1000);
+        waited_ms += poll_ms;
+    }
+
+    if (process_alive(rec.pid)) {
+        printf("MOCKER: '%s' did not exit after SIGTERM, sending SIGKILL\n", name);
+        fflush(stdout);
+        kill(rec.pid, SIGKILL);
+        waited_ms = 0;
+        while (waited_ms < timeout_ms && process_alive(rec.pid)) {
+            usleep(poll_ms * 1000);
+            waited_ms += poll_ms;
+        }
+    }
+
+    if (process_alive(rec.pid)) {
+        fprintf(stderr, "mocker: '%s' (pid %d) did not stop\n", name, (int)rec.pid);
+        return EXIT_FAILURE;
+    }
+
+    registry_entry_t entry = entry_from_record(&rec);
+    entry.status = "exited";
+    registry_write(&entry);
+
+    printf("MOCKER: '%s' stopped\n", name);
+    return EXIT_SUCCESS;
+}
+
+static int cmd_rm(int argc, char *argv[])
+{
+    if (argc != 3) {
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    const char *name = argv[2];
+
+    registry_record_t rec;
+    if (registry_read(name, &rec) == -1) {
+        fprintf(stderr, "mocker: no such container '%s'\n", name);
+        return EXIT_FAILURE;
+    }
+
+    if (process_alive(rec.pid)) {
+        fprintf(stderr, "mocker: '%s' is still running (pid %d) - `mocker stop` it first\n",
+                name, (int)rec.pid);
+        return EXIT_FAILURE;
+    }
+
+    /* Never touches the rootfs path - see docs/architecture.md section 5:
+     * `mocker run` only pivot_root()s into the user-supplied rootfs path, it
+     * never copies/owns it, so rm only cleans up what Mocker actually
+     * created: cgroup, veth, port rules, IP lease, registry entry. Each step
+     * is attempted even if an earlier one warns, so a container whose setup
+     * only partly succeeded can still be fully removed. */
+    int had_warning = 0;
+
+    if (cgroup_remove(name) == -1) {
+        fprintf(stderr, "mocker: warning: failed to remove cgroup for '%s'\n", name);
+        had_warning = 1;
+    }
+
+    char host_veth[NET_IFNAME_MAX];
+    char peer_veth[NET_IFNAME_MAX];
+    net_veth_names(name, host_veth, peer_veth);
+    if (net_veth_delete(host_veth) == -1) {
+        fprintf(stderr, "mocker: warning: failed to delete veth '%s' for '%s'\n", host_veth,
+                name);
+        had_warning = 1;
+    }
+
+    if (rec.host_port != -1) {
+        if (net_port_unmap(rec.ip, rec.host_port, rec.container_port) == -1) {
+            fprintf(stderr, "mocker: warning: failed to remove port mapping for '%s'\n", name);
+            had_warning = 1;
+        }
+    }
+
+    if (net_release_ip(name) == -1) {
+        fprintf(stderr, "mocker: warning: failed to release IP lease for '%s'\n", name);
+        had_warning = 1;
+    }
+
+    if (registry_remove(name) == -1) {
+        fprintf(stderr, "mocker: failed to remove registry entry for '%s'\n", name);
+        return EXIT_FAILURE;
+    }
+
+    if (had_warning)
+        printf("MOCKER: removed '%s' (with warnings above - some state may need manual "
+               "cleanup)\n",
+               name);
+    else
+        printf("MOCKER: removed '%s'\n", name);
+
+    return EXIT_SUCCESS;
+}
+
+static int cmd_ps(int argc, char *argv[])
+{
+    if (argc != 2) {
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    char names[256][REGISTRY_NAME_MAX];
+    int count = registry_list(names, 256);
+    if (count == -1)
+        return EXIT_FAILURE;
+
+    printf("%-20s %-8s %-16s %s\n", "NAME", "PID", "IP", "STATUS");
+    for (int i = 0; i < count; i++) {
+        registry_record_t rec;
+        if (registry_read(names[i], &rec) == -1)
+            continue;
+        /* Kernel-truth, not the stored status string - see CLAUDE.md
+         * section 10 / docs/architecture.md section 8. */
+        const char *status = process_alive(rec.pid) ? "running" : "exited";
+        printf("%-20s %-8d %-16s %s\n", rec.name, (int)rec.pid, rec.ip, status);
+    }
+
+    return EXIT_SUCCESS;
+}
+
+static void print_ns(const char *label, pid_t pid, const char *ns)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/ns/%s", (int)pid, ns);
+
+    char link[256];
+    ssize_t n = readlink(path, link, sizeof(link) - 1);
+    if (n == -1) {
+        printf("  %s: (unavailable)\n", label);
+        return;
+    }
+    link[n] = '\0';
+    printf("  %s: %s\n", label, link);
+}
+
+static int cmd_inspect(int argc, char *argv[])
+{
+    if (argc != 3) {
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+    const char *name = argv[2];
+
+    registry_record_t rec;
+    if (registry_read(name, &rec) == -1) {
+        fprintf(stderr, "mocker: no such container '%s'\n", name);
+        return EXIT_FAILURE;
+    }
+
+    int alive = process_alive(rec.pid);
+
+    printf("name: %s\n", rec.name);
+    printf("pid: %d\n", (int)rec.pid);
+    printf("status: %s (kernel-verified)\n", alive ? "running" : "exited");
+    printf("rootfs: %s\n", rec.rootfs_path);
+    printf("cgroup: %s\n", rec.cgroup_path);
+    printf("ip: %s\n", rec.ip);
+    if (rec.host_port != -1)
+        printf("port: %d:%d\n", rec.host_port, rec.container_port);
+
+    if (alive) {
+        /* Live, kernel-derived state - not re-read from state.json, per
+         * CLAUDE.md section 10. */
+        printf("namespaces:\n");
+        print_ns("pid", rec.pid, "pid");
+        print_ns("mnt", rec.pid, "mnt");
+        print_ns("uts", rec.pid, "uts");
+        print_ns("net", rec.pid, "net");
+
+        long mem_current = cgroup_get_memory_current(name);
+        long pids_current = cgroup_get_pids_current(name);
+        printf("cgroup usage:\n");
+        if (mem_current >= 0)
+            printf("  memory.current: %ld bytes\n", mem_current);
+        if (pids_current >= 0)
+            printf("  pids.current: %ld\n", pids_current);
+    }
 
     return EXIT_SUCCESS;
 }
 
 int main(int argc, char *argv[])
 {
-    if (argc < 2 || strcmp(argv[1], "run") != 0) {
+    if (argc < 2) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
 
-    return cmd_run(argc, argv);
+    if (strcmp(argv[1], "run") == 0)
+        return cmd_run(argc, argv);
+    if (strcmp(argv[1], "stop") == 0)
+        return cmd_stop(argc, argv);
+    if (strcmp(argv[1], "rm") == 0)
+        return cmd_rm(argc, argv);
+    if (strcmp(argv[1], "ps") == 0)
+        return cmd_ps(argc, argv);
+    if (strcmp(argv[1], "inspect") == 0)
+        return cmd_inspect(argc, argv);
+
+    print_usage(argv[0]);
+    return EXIT_FAILURE;
 }

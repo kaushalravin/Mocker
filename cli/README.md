@@ -86,11 +86,38 @@ Verify networking (stage 5) the same way — from kernel-visible state, not just
   should reach it. `sudo iptables -t nat -L -n` should show the PREROUTING/OUTPUT
   DNAT rules and the POSTROUTING MASQUERADE rule.
 
-`mocker run` does not clean up after itself — the cgroup directory and the
-registry entry are deliberately left in place once the container exits.
-Cleanup is `mocker rm`'s job; it's designed in
-[../docs/architecture.md](../docs/architecture.md) section 5 but not yet
-implemented (CLAUDE.md section 9 forbids improvising that logic inline).
+`mocker run` does not clean up after itself — the cgroup directory, veth,
+port-mapping rules, IP lease, and registry entry are deliberately left in
+place once the container exits, so a second shell can still `mocker
+inspect`/`ps` the container's final state. Cleanup is `mocker rm`'s job (see
+below).
+
+## Other commands
+
+```
+sudo ./mocker stop <name>       # SIGTERM, then SIGKILL after a 5s timeout if still alive
+sudo ./mocker rm <name>         # remove a stopped container's cgroup/network/registry state
+sudo ./mocker ps                # list every container, with kernel-verified status
+sudo ./mocker inspect <name>    # registry entry + live /proc/<pid>/ns/* + cgroup usage
+```
+
+`stop` sends `SIGTERM` first and only escalates to `SIGKILL` after a timeout
+— the registered PID is PID 1 *inside its own PID namespace*, which gets the
+same signal-disposition immunity real init has, so `SIGTERM` alone often
+does nothing (same reasoning `docker stop` has a grace period). See
+[../docs/architecture.md](../docs/architecture.md) section 8.
+
+`rm` refuses to run against a container that's still alive (`/proc/<pid>`
+exists) — `stop` it first. It never touches the rootfs path: `mocker run`
+never copies/owns the rootfs it's given, so, per
+[../docs/filesystem-safety.md](../docs/filesystem-safety.md), `rm` only
+removes state Mocker actually created (cgroup dir, host-side veth, any
+`--port` iptables rules, the IP lease, the registry entry). Full design in
+[../docs/architecture.md](../docs/architecture.md) sections 5 and 8.
+
+`ps`/`inspect` never trust `state.json`'s stored `status` field alone — both
+re-check `/proc/<pid>` at read time (CLAUDE.md section 10), since a container
+killed outside Mocker would otherwise show "running" forever.
 
 ## Layout
 
@@ -110,5 +137,5 @@ cli/
 ```
 
 Modules not yet present (`proc_launch.c`) will land as their build stages are
-reached. `mocker stop`/`rm`/`ps`/`inspect`/`logs`/`exec` are CLI surface not
-built yet — `run` is the only subcommand so far.
+reached. `mocker logs`/`exec` are CLI surface not built yet; `run`/`stop`/
+`rm`/`ps`/`inspect` are all implemented.
