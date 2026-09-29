@@ -10,13 +10,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#define CONTAINER_HOSTNAME "mocker"
 #define CLONE_STACK_SIZE (1024 * 1024)
 
-/* clone()'s raw void *arg can only carry one pointer, so the child's two
- * real inputs (rootfs path, command) travel together in this struct. */
+/* clone()'s raw void *arg can only carry one pointer, so the child's real
+ * inputs (rootfs path, hostname, command) travel together in this struct. */
 typedef struct {
     const char *rootfs_path;
+    const char *hostname;
     char *const *argv;
 } container_args_t;
 
@@ -29,7 +29,7 @@ static int container_entry(void *arg)
     printf("CONTAINER: PID 1 alive (getpid()=%d inside its own namespace)\n", getpid());
     fflush(stdout);
 
-    if (set_container_hostname(CONTAINER_HOSTNAME) == -1)
+    if (set_container_hostname(args->hostname) == -1)
         _exit(EXIT_FAILURE);
 
     if (mount_setup_pivot_root(args->rootfs_path) == -1)
@@ -42,7 +42,7 @@ static int container_entry(void *arg)
     _exit(EXIT_FAILURE);
 }
 
-pid_t launch_container(const char *rootfs_path, char *const argv[])
+pid_t launch_container(const char *rootfs_path, const char *hostname, char *const argv[])
 {
     void *stack = malloc(CLONE_STACK_SIZE);
     if (stack == NULL) {
@@ -54,6 +54,7 @@ pid_t launch_container(const char *rootfs_path, char *const argv[])
 
     container_args_t args = {
         .rootfs_path = rootfs_path,
+        .hostname = hostname,
         .argv = argv,
     };
 

@@ -7,13 +7,13 @@
 #include <stdlib.h>
 #include <sys/wait.h>
 
-pid_t create_process(const char *rootfs_path, char *const argv[])
+pid_t create_process(const char *rootfs_path, const char *hostname, char *const argv[])
 {
     /* No fork() here - launch_container()'s single clone() call *is* the
      * process creation step. Forking first and setting up namespaces inside
      * the fork is exactly the piecemeal pattern stage 3 replaced (see
      * docs/architecture.md section 2). */
-    pid_t pid = launch_container(rootfs_path, argv);
+    pid_t pid = launch_container(rootfs_path, hostname, argv);
     if (pid == -1)
         exit(EXIT_FAILURE);
 

@@ -1,6 +1,7 @@
 #ifndef CGROUPS_H
 #define CGROUPS_H
 
+#include <stddef.h>
 #include <sys/types.h>
 
 /*
@@ -16,6 +17,12 @@ typedef struct {
 /* True if /sys/fs/cgroup is the unified cgroups v2 hierarchy. Never assume
  * this - always check, since v1's file layout is completely different. */
 int cgroups_v2_available(void);
+
+/* Fills out with this container's cgroup directory path
+ * (/sys/fs/cgroup/mocker/<name>). Returns -1 (and writes nothing) if name
+ * fails validation - the same check every other function in this file goes
+ * through before building a path from <name>. */
+int cgroup_dir_path(const char *name, char *out, size_t out_size);
 
 /* Creates /sys/fs/cgroup/mocker/<name>. Fails if it already exists. */
 int cgroup_create(const char *name);

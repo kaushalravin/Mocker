@@ -3,7 +3,7 @@
 
 #include <sys/types.h>  // pid_t
 
-pid_t create_process(const char *rootfs_path, char *const argv[]);
+pid_t create_process(const char *rootfs_path, const char *hostname, char *const argv[]);
 void wait_for_process(pid_t pid);
 
 #endif

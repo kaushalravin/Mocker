@@ -10,12 +10,12 @@
  * change") for why this must be one call, not namespaces layered on via
  * separate fork()/unshare()/clone() steps.
  *
- * Inside the new namespaces, the child sets its hostname, pivot_root()s into
- * rootfs_path, mounts a fresh /proc, then execvp()s argv. argv must be
- * NULL-terminated; argv[0] is the command to run.
+ * Inside the new namespaces, the child sets its hostname to hostname,
+ * pivot_root()s into rootfs_path, mounts a fresh /proc, then execvp()s argv.
+ * argv must be NULL-terminated; argv[0] is the command to run.
  *
  * Returns the child's host-visible PID (for the caller's waitpid()), or -1.
  */
-pid_t launch_container(const char *rootfs_path, char *const argv[]);
+pid_t launch_container(const char *rootfs_path, const char *hostname, char *const argv[]);
 
 #endif

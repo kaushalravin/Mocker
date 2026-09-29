@@ -38,7 +38,7 @@ static int is_valid_name(const char *name)
     return 1;
 }
 
-static int build_cgroup_dir(const char *name, char *out, size_t out_size)
+int cgroup_dir_path(const char *name, char *out, size_t out_size)
 {
     if (!is_valid_name(name)) {
         fprintf(stderr, "cgroups: invalid container name '%s'\n", name ? name : "(null)");
@@ -118,7 +118,7 @@ int cgroup_create(const char *name)
         return -1;
     }
 
-    if (build_cgroup_dir(name, dir, sizeof(dir)) == -1)
+    if (cgroup_dir_path(name, dir, sizeof(dir)) == -1)
         return -1;
 
     /* The shared "mocker" parent may already exist from an earlier
@@ -144,7 +144,7 @@ int cgroup_write_file(const char *name, const char *file, const char *value)
     char dir[PATH_MAX];
     char path[PATH_MAX];
 
-    if (build_cgroup_dir(name, dir, sizeof(dir)) == -1)
+    if (cgroup_dir_path(name, dir, sizeof(dir)) == -1)
         return -1;
 
     int n = snprintf(path, sizeof(path), "%s/%s", dir, file);
@@ -161,7 +161,7 @@ static long read_cgroup_file_long(const char *name, const char *file)
     char dir[PATH_MAX];
     char path[PATH_MAX];
 
-    if (build_cgroup_dir(name, dir, sizeof(dir)) == -1)
+    if (cgroup_dir_path(name, dir, sizeof(dir)) == -1)
         return -1;
 
     int n = snprintf(path, sizeof(path), "%s/%s", dir, file);
@@ -228,7 +228,7 @@ int cgroup_remove(const char *name)
 {
     char dir[PATH_MAX];
 
-    if (build_cgroup_dir(name, dir, sizeof(dir)) == -1)
+    if (cgroup_dir_path(name, dir, sizeof(dir)) == -1)
         return -1;
 
     /* Only removable once empty of processes - the kernel enforces that

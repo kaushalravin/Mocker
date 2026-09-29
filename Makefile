@@ -8,10 +8,12 @@ SRC = cli/src/main.c \
       cli/src/process/process.c \
       cli/src/namespace/namespace.c \
       cli/src/namespace/uts.c \
-      cli/src/mount/mount_setup.c
+      cli/src/mount/mount_setup.c \
+      cli/src/cgroups/cgroups.c \
+      cli/src/registry/registry.c
 
-# Stage-2 standalone cgroups test - not linked into the mocker binary yet,
-# see docs/architecture.md "Combine" stage.
+# Standalone stage-2 cgroups OOM-kill proof - separate from the mocker
+# binary; it exercises cgroups.c on its own, not through `mocker run`.
 CGROUP_TEST_TARGET = cgroup-test
 
 CGROUP_TEST_SRC = cli/src/cgroups/cgroups.c \

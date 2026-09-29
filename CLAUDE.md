@@ -10,16 +10,21 @@ and cgroups v2 — no Docker, no `runc`, no OCI runtime underneath it. The prima
 build it, run it inside a `mocker` container, and expose it through a reverse proxy.
 
 Current state: repo structure is in place (`cli/`, `mockerhost/`, `demo/`, `docs/`). Stage 1
-(architecture/safety docs, `docs/architecture.md` + `docs/filesystem-safety.md`) and stage 2
-(cgroups — `cli/src/cgroups/`, kernel-verified OOM-kill test) are done. Stage 3 (PID + mount + UTS
-namespaces) is implemented but **not yet verified on Linux**: a single `clone(CLONE_NEWPID |
-CLONE_NEWNS | CLONE_NEWUTS)` in `cli/src/namespace/namespace.c` replaces the old piecemeal
-`fork()`/`unshare()`/`clone()` chain, `cli/src/mount/mount_setup.c` implements the 9-step
-`pivot_root()` sequence from `docs/architecture.md` section 4, and `main.c` execs an
-arbitrary caller-supplied command (no longer a hardcoded shell) against a caller-supplied rootfs
-path. Cgroups are still standalone/unlinked from the main binary — that's stage 4 ("Combine"), along
-with a real `mocker run` CLI and `registry.c`. Update this file as real structure and decisions
-land.
+(architecture/safety docs, `docs/architecture.md` + `docs/filesystem-safety.md`), stage 2
+(cgroups — `cli/src/cgroups/`, kernel-verified OOM-kill test), and stage 3 (PID + mount + UTS
+namespaces via a single `clone(CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS)` in
+`cli/src/namespace/namespace.c`, plus the 9-step `pivot_root()` sequence in
+`cli/src/mount/mount_setup.c`) are done and verified on the Lubuntu VM. Stage 4 ("Combine") is
+implemented but **not yet verified on Linux**: `cgroups.c` is now linked into the main binary,
+`cli/src/main.c` is a real `mocker run` CLI (`--name`/`--mem-mb`/`--pids`/`--cpu-percent`, plus
+`<rootfs-path> -- <cmd> [args...]`) that creates the cgroup, applies limits, launches the
+namespaced+pivot_root'd container, attaches its PID to the cgroup immediately after `clone()`
+returns, and records a `state.json` registry entry via the new `cli/src/registry/registry.c`
+(per `docs/architecture.md` section 1). The container's hostname is now set to `--name` instead
+of a hardcoded string. `mocker rm`/`stop`/`ps`/`inspect`/`logs`/`exec` are not built yet — cgroup
+and registry cleanup after a container exits is deliberately left for `mocker rm`
+(`docs/architecture.md` section 5), not implemented inline. Update this file as real structure and
+decisions land.
 
 ## 2. Academic objective
 
@@ -55,10 +60,11 @@ Mocker/                       # repo root
 │   ├── src/
 │   │   ├── namespace/        # namespace.c (single-clone dispatcher), uts.c
 │   │   ├── mount/            # mount_setup.c (pivot_root sequence)
-│   │   ├── cgroups/          # cgroups.c/.h + standalone cgroups_test.c (stage 2, unlinked)
+│   │   ├── cgroups/          # cgroups.c/.h (linked into mocker) + standalone cgroups_test.c
 │   │   ├── process/          # launch/wait wrapper around namespace.c
-│   │   ├── main.c            # stage-3 test harness, not the final CLI
-│   │   # not yet split out: net_setup.c, proc_launch.c, registry.c
+│   │   ├── registry/         # registry.c/.h (per-container state.json)
+│   │   ├── main.c            # the real `mocker run` CLI (stage 4)
+│   │   # not yet split out: net_setup.c, proc_launch.c
 │   └── README.md
 ├── mockerhost/
 │   ├── clone_and_build.*     # not started
