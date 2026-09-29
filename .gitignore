@@ -4,5 +4,6 @@ OS_Project_Team_Prep.docx
 # build artifacts
 mocker
 minidocker
+cgroup-test
 *.o
 *.out

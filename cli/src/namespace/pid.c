@@ -13,21 +13,11 @@ static int pid_ns_child(void *arg)
 {
     (void)arg;
 
-    printf("PID: inside PID namespace\n");
-    printf("PID: my PID = %d\n", getpid());
+    /* This process is PID 1 inside the new PID namespace. */
+    printf("PID: inside PID namespace, my PID = %d\n", getpid());
     fflush(stdout);
 
-    /*
-     * This process is PID 1 inside
-     * the new PID namespace.
-     */
-
-    char *const argv[] = {
-        "/bin/bash",
-        "-i",
-        NULL
-    };
-
+    char *const argv[] = {"/bin/bash", "-i", NULL};
     execv("/bin/bash", argv);
 
     perror("execv bash");
@@ -40,13 +30,9 @@ void setup_pid_namespace(void)
     printf("PID: setting up PID namespace...\n");
     fflush(stdout);
 
-    /*
-     * clone() creates a child process
-     * inside a new PID namespace.
-     */
-
+    /* clone() needs a stack for the child to run on - it doesn't share the
+     * caller's stack like fork() does. */
     size_t stack_size = 65536;
-
     void *stack = malloc(stack_size);
 
     if (stack == NULL)
@@ -57,12 +43,10 @@ void setup_pid_namespace(void)
 
     void *stack_top = (char *)stack + stack_size;
 
-    pid_t pid = clone(
-        pid_ns_child,
-        stack_top,
-        CLONE_NEWPID | SIGCHLD,
-        NULL
-    );
+    /* CLONE_NEWPID puts the child in a fresh PID namespace, where it
+     * becomes PID 1. SIGCHLD makes clone() behave like fork() for the
+     * parent's waitpid(). */
+    pid_t pid = clone(pid_ns_child, stack_top, CLONE_NEWPID | SIGCHLD, NULL);
 
     if (pid == -1)
     {
@@ -71,16 +55,8 @@ void setup_pid_namespace(void)
         exit(EXIT_FAILURE);
     }
 
-    printf(
-        "PID: namespace child created. Host PID = %d\n",
-        pid
-    );
-
+    printf("PID: namespace child created. Host PID = %d\n", pid);
     fflush(stdout);
-
-    /*
-     * Parent waits for Bash/container process.
-     */
 
     int status;
 
