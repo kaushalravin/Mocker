@@ -8,7 +8,7 @@ SRC = cli/src/main.c \
       cli/src/process/process.c \
       cli/src/namespace/namespace.c \
       cli/src/namespace/uts.c \
-      cli/src/namespace/pid.c
+      cli/src/mount/mount_setup.c
 
 # Stage-2 standalone cgroups test - not linked into the mocker binary yet,
 # see docs/architecture.md "Combine" stage.

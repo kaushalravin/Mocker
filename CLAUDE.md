@@ -9,10 +9,17 @@ and cgroups v2 — no Docker, no `runc`, no OCI runtime underneath it. The prima
 `mocker` CLI/runtime itself. A secondary layer, `mockerhost`, will eventually take a GitHub repo,
 build it, run it inside a `mocker` container, and expose it through a reverse proxy.
 
-Current state: repo structure is in place (`cli/`, `mockerhost/`, `demo/`, `docs/`) and `cli/src/`
-has an early prototype — `fork()` + `unshare(CLONE_NEWUTS)`/`sethostname()` + `clone(CLONE_NEWPID)`
-spawning a shell as PID 1. No mount namespace/`pivot_root`, no cgroups, and no arbitrary-command
-exec yet. That's Stage 1+ work. Update this file as real structure and decisions land.
+Current state: repo structure is in place (`cli/`, `mockerhost/`, `demo/`, `docs/`). Stage 1
+(architecture/safety docs, `docs/architecture.md` + `docs/filesystem-safety.md`) and stage 2
+(cgroups — `cli/src/cgroups/`, kernel-verified OOM-kill test) are done. Stage 3 (PID + mount + UTS
+namespaces) is implemented but **not yet verified on Linux**: a single `clone(CLONE_NEWPID |
+CLONE_NEWNS | CLONE_NEWUTS)` in `cli/src/namespace/namespace.c` replaces the old piecemeal
+`fork()`/`unshare()`/`clone()` chain, `cli/src/mount/mount_setup.c` implements the 9-step
+`pivot_root()` sequence from `docs/architecture.md` section 4, and `main.c` execs an
+arbitrary caller-supplied command (no longer a hardcoded shell) against a caller-supplied rootfs
+path. Cgroups are still standalone/unlinked from the main binary — that's stage 4 ("Combine"), along
+with a real `mocker run` CLI and `registry.c`. Update this file as real structure and decisions
+land.
 
 ## 2. Academic objective
 
@@ -46,10 +53,12 @@ restructure blindly once code exists:
 Mocker/                       # repo root
 ├── cli/
 │   ├── src/
-│   │   ├── namespace/        # namespace.c (dispatcher), uts.c, pid.c (mount/net later)
-│   │   ├── process/          # fork/wait wrapper around namespace setup
-│   │   ├── main.c
-│   │   # not yet split out: cgroups.c, mount_setup.c, net_setup.c, proc_launch.c, registry.c
+│   │   ├── namespace/        # namespace.c (single-clone dispatcher), uts.c
+│   │   ├── mount/            # mount_setup.c (pivot_root sequence)
+│   │   ├── cgroups/          # cgroups.c/.h + standalone cgroups_test.c (stage 2, unlinked)
+│   │   ├── process/          # launch/wait wrapper around namespace.c
+│   │   ├── main.c            # stage-3 test harness, not the final CLI
+│   │   # not yet split out: net_setup.c, proc_launch.c, registry.c
 │   └── README.md
 ├── mockerhost/
 │   ├── clone_and_build.*     # not started

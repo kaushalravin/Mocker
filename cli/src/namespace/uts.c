@@ -3,23 +3,19 @@
 #include "uts.h"
 
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
-#include <sched.h>
 
-void setup_uts_namespace(){
-
-    if(unshare(CLONE_NEWUTS) == -1)
-    {
-        perror("unshare UTS");
-        exit(EXIT_FAILURE);
-    }
-
-    if (sethostname("mocker", 6) == -1)
-    {
+int set_container_hostname(const char *hostname)
+{
+    /* No unshare(CLONE_NEWUTS) here - the single clone() call in
+     * namespace.c already put this process in a fresh UTS namespace, so
+     * sethostname() only ever affects the container, never the host. */
+    if (sethostname(hostname, strlen(hostname)) == -1) {
         perror("sethostname");
-        exit(EXIT_FAILURE);
+        return -1;
     }
 
-    printf("UTS: hostname set to mocker\n");
+    printf("UTS: hostname set to %s\n", hostname);
+    return 0;
 }
