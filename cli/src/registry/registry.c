@@ -139,16 +139,19 @@ int registry_read(const char *name, registry_record_t *out)
         int intval;
 
         if (sscanf(line, " \"%63[^\"]\" : \"%399[^\"]\"", key, strval) == 2) {
+            /* Precision matched to each destination's own size (sizeof(dst) - 1),
+             * not just "%s", so gcc can prove the copy fits and drop the
+             * -Wformat-truncation= warning - snprintf() was already safe either way. */
             if (strcmp(key, "name") == 0)
-                snprintf(out->name, sizeof(out->name), "%s", strval);
+                snprintf(out->name, sizeof(out->name), "%.64s", strval);
             else if (strcmp(key, "rootfs") == 0)
                 snprintf(out->rootfs_path, sizeof(out->rootfs_path), "%s", strval);
             else if (strcmp(key, "cgroup") == 0)
                 snprintf(out->cgroup_path, sizeof(out->cgroup_path), "%s", strval);
             else if (strcmp(key, "ip") == 0)
-                snprintf(out->ip, sizeof(out->ip), "%s", strval);
+                snprintf(out->ip, sizeof(out->ip), "%.31s", strval);
             else if (strcmp(key, "status") == 0)
-                snprintf(out->status, sizeof(out->status), "%s", strval);
+                snprintf(out->status, sizeof(out->status), "%.15s", strval);
         } else if (sscanf(line, " \"%63[^\"]\" : %d", key, &intval) == 2) {
             if (strcmp(key, "pid") == 0)
                 out->pid = (pid_t)intval;
@@ -189,7 +192,10 @@ int registry_list(char names[][REGISTRY_NAME_MAX], int max_names)
             continue;
         if (!registry_valid_name(ent->d_name))
             continue; /* not a name mocker could have created - skip rather than fail the listing */
-        snprintf(names[count], REGISTRY_NAME_MAX, "%s", ent->d_name);
+        /* d_name could theoretically be up to NAME_MAX+1 bytes; registry_valid_name()
+         * already rejected anything over 64 chars, but the precision here lets gcc
+         * verify the copy fits REGISTRY_NAME_MAX without relying on that check alone. */
+        snprintf(names[count], REGISTRY_NAME_MAX, "%.64s", ent->d_name);
         count++;
     }
 
@@ -229,8 +235,15 @@ int registry_remove(const char *name)
         return -1;
     }
 
-    char state_path[PATH_MAX];
-    snprintf(state_path, sizeof(state_path), "%s/state.json", resolved);
+    /* Sized a few bytes past PATH_MAX (not just PATH_MAX) so gcc can prove
+     * "<resolved>/state.json" can never truncate, even though resolved (from
+     * realpath()) could itself be up to PATH_MAX-1 bytes long. */
+    char state_path[PATH_MAX + 16];
+    int state_n = snprintf(state_path, sizeof(state_path), "%s/state.json", resolved);
+    if (state_n < 0 || (size_t)state_n >= sizeof(state_path)) {
+        fprintf(stderr, "registry: path too long for container '%s'\n", name);
+        return -1;
+    }
     if (unlink(state_path) == -1 && errno != ENOENT) {
         perror(state_path);
         return -1;

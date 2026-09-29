@@ -41,9 +41,10 @@ the bridge, `ping` to the gateway succeeds, `/proc/<pid>/ns/net` resolves to a n
 from the host's, `mocker0`/host-side veth/iptables NAT+DNAT rules all show up in kernel-visible
 state on the host, and a port mapped with `--port` was reachable end-to-end with `curl`. See
 `docs/architecture.md` section 7 for the full design. `mocker stop`/`rm`/`ps`/`inspect` are now
-implemented (`cli/src/main.c`, per `docs/architecture.md` sections 5 and 8) but **not yet verified
-on the Lubuntu VM** — written in this Windows session with no Linux toolchain available, so treat as
-untested until confirmed there. `stop` sends `SIGTERM` then escalates to `SIGKILL` after a 5s
+implemented (`cli/src/main.c`, per `docs/architecture.md` sections 5 and 8) and **compile cleanly on
+the Lubuntu VM** (`make` succeeds with no warnings), but their actual runtime behavior is **not yet
+functionally verified there** — the compile pass only proves the code builds, not that
+`stop`/`rm`/`ps`/`inspect` behave correctly against a live container. `stop` sends `SIGTERM` then escalates to `SIGKILL` after a 5s
 timeout (PID-namespace-init signal immunity, section 8); `rm` refuses a still-running container and
 only cleans up cgroup/veth/port-rules/IP-lease/registry state — never the rootfs, which Mocker never
 copies or owns; `ps`/`inspect` always re-derive liveness from `/proc/<pid>`, never trusting the
