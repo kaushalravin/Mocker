@@ -25,8 +25,26 @@ sudo ./cgroup-test
 
 `<rootfs-path>` must already exist and be populated (a minimal BusyBox/Alpine
 rootfs works for testing) — `mocker` does not build or fetch one for you yet;
-that's later `mockerhost`/rootfs-assembly work. Example, once you have one at
-`/root/test-rootfs`:
+that's later `mockerhost`/rootfs-assembly work. A static BusyBox rootfs is the
+quickest thing that works, and needs an empty `proc/` directory too (`mocker`
+mounts `/proc` itself during `pivot_root`, but expects the mountpoint to
+already exist in the rootfs):
+
+```
+sudo apt-get update && sudo apt-get install -y busybox-static
+sudo mkdir -p /root/test-rootfs/bin /root/test-rootfs/proc
+sudo cp "$(which busybox)" /root/test-rootfs/bin/busybox
+cd /root/test-rootfs/bin && sudo ./busybox --install . && cd -
+```
+
+Use plain `--install` (hardlinks), **not** `--install -s` (symlinks) — BusyBox's symlink
+installer points each applet at the binary's absolute host path (resolved via
+`/proc/self/exe` at install time, e.g. `/root/test-rootfs/bin/busybox`). After
+`pivot_root`, that path no longer exists from inside the container (`/root/test-rootfs`
+*is* the container's `/` now), so every applet becomes a dangling symlink and
+`execvp()` fails with `ENOENT`. Hardlinks have no path to break.
+
+Then, once you have a rootfs at `/root/test-rootfs`:
 
 ```
 sudo ./mocker run --name test1 --mem-mb 64 --pids 32 --cpu-percent 50 /root/test-rootfs -- /bin/sh

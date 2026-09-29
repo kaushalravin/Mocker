@@ -15,16 +15,20 @@ Current state: repo structure is in place (`cli/`, `mockerhost/`, `demo/`, `docs
 namespaces via a single `clone(CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS)` in
 `cli/src/namespace/namespace.c`, plus the 9-step `pivot_root()` sequence in
 `cli/src/mount/mount_setup.c`) are done and verified on the Lubuntu VM. Stage 4 ("Combine") is
-implemented but **not yet verified on Linux**: `cgroups.c` is now linked into the main binary,
+also done and verified on the Lubuntu VM: `cgroups.c` is linked into the main binary,
 `cli/src/main.c` is a real `mocker run` CLI (`--name`/`--mem-mb`/`--pids`/`--cpu-percent`, plus
 `<rootfs-path> -- <cmd> [args...]`) that creates the cgroup, applies limits, launches the
 namespaced+pivot_root'd container, attaches its PID to the cgroup immediately after `clone()`
-returns, and records a `state.json` registry entry via the new `cli/src/registry/registry.c`
+returns, and records a `state.json` registry entry via `cli/src/registry/registry.c`
 (per `docs/architecture.md` section 1). The container's hostname is now set to `--name` instead
-of a hardcoded string. `mocker rm`/`stop`/`ps`/`inspect`/`logs`/`exec` are not built yet — cgroup
-and registry cleanup after a container exits is deliberately left for `mocker rm`
-(`docs/architecture.md` section 5), not implemented inline. Update this file as real structure and
-decisions land.
+of a hardcoded string. Verified end-to-end on the VM with a BusyBox rootfs (applets installed as
+**hardlinks**, not symlinks — `busybox --install -s` breaks after `pivot_root` since the symlink
+target is an absolute host path; see `cli/README.md`): hostname, `/`, and `getpid()` all correctly
+reflect the container's namespaces from inside a live `/bin/sh`, and `memory.max`/`pids.max` and
+`state.json` match what was requested. `mocker rm`/`stop`/`ps`/`inspect`/`logs`/`exec` are not
+built yet — cgroup and registry cleanup after a container exits is deliberately left for
+`mocker rm` (`docs/architecture.md` section 5), not implemented inline. Update this file as real
+structure and decisions land.
 
 ## 2. Academic objective
 
