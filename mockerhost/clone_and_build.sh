@@ -135,6 +135,8 @@ fi
 # can register the proxy and return, while the deployed app keeps running.
 # Run from mockerhost/'s own cwd (not repo root) - $MOCKER_BIN is "../mocker"
 # relative to here; $APP_ROOTFS is already an absolute path either way.
+echo "DEPLOY: container command = [cd /app && $BUILD_CMD && $RUN_CMD]" >> "$LOG_FILE"
+
 (
     "$MOCKER_BIN" run --name "$NAME" --mem-mb 512 --pids 256 \
         --port "$HOST_PORT:$CONTAINER_PORT" \

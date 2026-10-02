@@ -352,9 +352,17 @@ static void handle_deploy(int fd, const char *body)
          * host port to the browser at all. */
         char deployed_name[NAME_MAX_LEN + 8] = "";
         sscanf(detail, "%63s", deployed_name);
+        /* This page is served from :8080 (the control plane), but the app is
+         * proxied by nginx on port 80 - a relative href would resolve against
+         * :8080 and 404. Build the link from the browser's own hostname with
+         * no port (= 80) instead. deployed_name is already a validated slug. */
         snprintf(response_body, sizeof(response_body),
                  "<html><body><h1>Deployed</h1><p>Live at "
-                 "<a href=\"/apps/%s/\">/apps/%s/</a></p></body></html>",
+                 "<a id=\"l\" href=\"#\">(enable JavaScript, or open "
+                 "http://&lt;vm-ip&gt;/apps/%s/ on port 80)</a></p>"
+                 "<script>var u=location.protocol+\"//\"+location.hostname+\"/apps/%s/\";"
+                 "var a=document.getElementById(\"l\");a.href=u;a.textContent=u;</script>"
+                 "</body></html>",
                  deployed_name, deployed_name);
         send_response(fd, 200, "OK", "text/html", response_body);
     } else {
