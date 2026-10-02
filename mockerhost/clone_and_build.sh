@@ -158,9 +158,20 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 
 # --- register with the reverse proxy ---------------------------------------------
+# Proxy straight to the container's own IP on the mocker0 bridge, NOT to
+# 127.0.0.1:$HOST_PORT. mocker's --port rule is a DNAT in nat/OUTPUT, and a
+# connection nginx opens to 127.0.0.1 keeps source 127.0.0.1 after the DNAT,
+# which the kernel won't route out over mocker0 (and the container couldn't
+# reply to) - it just hangs, so nginx reports a 504. The host can reach
+# 10.200.0.x directly over the bridge with no NAT involved.
+CONTAINER_IP="$(sed -n 's/.*"ip": *"\([0-9.]*\)".*/\1/p' "$STATE_FILE")"
+if [ -z "$CONTAINER_IP" ]; then
+    fail "could_not_read_container_ip_from_state_json"
+fi
+
 cat > "$MOCKERHOST_ROOT/nginx/apps/$NAME.conf" <<EOF
 location /apps/$NAME/ {
-    proxy_pass http://127.0.0.1:$HOST_PORT/;
+    proxy_pass http://$CONTAINER_IP:$CONTAINER_PORT/;
 }
 EOF
 
