@@ -64,7 +64,7 @@ fi
 # layer is shell by design (docs/mockerhost-design.md section 2).
 lease_port() {
     (
-        flock -x 200
+        flock -x 9
         port="$PORT_RANGE_START"
         while [ "$port" -le "$PORT_RANGE_END" ]; do
             if ! grep -q "^$port " "$LEASES_FILE" 2>/dev/null; then
@@ -75,15 +75,15 @@ lease_port() {
             port=$((port + 1))
         done
         return 1
-    ) 200>"$LEASES_FILE.lock"
+    ) 9>"$LEASES_FILE.lock"
 }
 
 release_port() {
     (
-        flock -x 200
+        flock -x 9
         grep -v " $NAME\$" "$LEASES_FILE" > "$LEASES_FILE.tmp" 2>/dev/null || true
         mv "$LEASES_FILE.tmp" "$LEASES_FILE"
-    ) 200>"$LEASES_FILE.lock"
+    ) 9>"$LEASES_FILE.lock"
 }
 
 HOST_PORT="$(lease_port)"
@@ -140,8 +140,7 @@ fi
         --port "$HOST_PORT:$CONTAINER_PORT" \
         "$APP_ROOTFS" -- sh -c "cd /app && $BUILD_CMD && $RUN_CMD" \
         >> "$LOG_FILE" 2>&1
-) &
-disown
+) < /dev/null > /dev/null 2>&1 &
 
 # --- confirm the container actually started ------------------------------------
 STATE_FILE="/var/lib/mocker/containers/$NAME/state.json"
