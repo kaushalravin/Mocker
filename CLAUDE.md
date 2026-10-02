@@ -68,7 +68,7 @@ concurrent deploys and leave the cloned repo unreachable once `pivot_root()` det
 `git clone --depth 1`s into `.../rootfs/app`, launches `./mocker run ... -- sh -c "cd /app &&
 $build_cmd && $run_cmd"` in the background, polls for `state.json`, and writes/reloads an nginx
 `location` block under `/var/lib/mockerhost/nginx/apps/<name>.conf` (one-time site template at
-`mockerhost/nginx/mockerhost.conf`). Deploy-only (no teardown command yet), local-network-only
+`mockerhost/nginx/mockerhost.conf`). Teardown is an operator-only command (`mockerhost/teardown.sh` + `mockerhost/src/rmtree.c`, per `docs/mockerhost-teardown-design.md`; **implemented, not yet VM-verified**), local-network-only
 (path-based routing at `http://<vm-ip>/apps/<name>/`, no public DNS/TLS), no terminal/exec from the
 web UI (deferred — no user namespace yet, see section 5). Build target added to the top-level
 `Makefile` (`mockerhost/mockerhost-server`, independent of `cli/src/*.c`). See
@@ -122,6 +122,8 @@ Mocker/                       # repo root
 │   ├── src/server.c          # raw-socket HTTP server: serves the form, handles POST /deploy
 │   ├── static/index.html     # the deploy form (github url, build cmd, run cmd, container port)
 │   ├── clone_and_build.sh    # clone + mocker run + nginx registration, invoked by server.c
+│   ├── teardown.sh           # operator-only: stop/rm app, drop nginx conf + lease, rmtree rootfs
+│   ├── src/rmtree.c          # mockerhost-rmtree: safe unlinkat()-based deletion of apps/<name>/
 │   ├── nginx/mockerhost.conf # one-time nginx site template
 │   └── README.md
 ├── demo/
@@ -179,15 +181,17 @@ CLI command MVP ordering (do not implement all commands up front):
 ### Next steps (in order, after stage 6)
 
 1. ~~Verify `mocker stop`/`rm`/`ps`/`inspect` on live containers~~ — done, VM-verified.
-2. **Demo programs** — write `demo/leak.c` and `demo/forkbomb.c`, and prove the limits hold: a
-   forkbomb capped by `pids.max`, a leak killed by `memory.max`, host unaffected.
+2. ~~Demo programs~~ — `demo/leak.c` and `demo/forkbomb.c` done, VM-verified: `memory.events`
+   `oom_kill`, `pids.events` `max`, host unaffected (`demo/README.md`).
 3. **Stage 7, the multi-container demo** — two containers with independent PIDs, filesystem views,
    hostnames, IPs/ports, and independently enforced cgroup limits; mostly a scripted demonstration
    of what stages 3-6 already provide.
-4. **`mockerhost` teardown** — a flow to stop/remove a deployed app and delete its nginx conf, port
-   lease, and per-deploy rootfs copy. Deleting the rootfs copy needs the same design-before-code
-   review `mocker rm` got (section 9) — design it before implementing; never `rm -rf` an
-   unverified path.
+4. **`mockerhost` teardown** — designed (`docs/mockerhost-teardown-design.md`, approved) and
+   implemented: `mockerhost/teardown.sh <name>` stops/removes the container, drops the nginx conf and
+   port lease, then deletes the per-deploy rootfs copy via `mockerhost/src/rmtree.c`
+   (`unlinkat()`-based, no symlink following, refuses mounts; never `rm -rf`).
+   **Written on Windows, not yet verified on the Lubuntu VM** - verify against kernel state
+   (section 10) before marking done.
 5. **Final write-up** — update `README.md` and `docs/`, and the known-limitations section: no user
    namespace, isolation is namespaces + cgroups only (shared kernel, not a VM boundary).
 

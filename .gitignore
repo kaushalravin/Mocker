@@ -10,3 +10,5 @@ cgroup-test
 # demo binaries (built by `make demos`)
 /demo/leak
 /demo/forkbomb
+# mockerhost teardown helper
+/mockerhost/mockerhost-rmtree

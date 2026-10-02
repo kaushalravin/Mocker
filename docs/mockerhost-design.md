@@ -15,8 +15,10 @@ strings a web visitor typed into a form), so the shape of that boundary is decid
   UI is deliberately out of scope: there is still no user namespace (`CLAUDE.md` §5/§8) — root in a
   container is root on the host — so a shell reachable by anyone on the network is a host-compromise
   path, not just a container one. Revisit only after user namespaces exist.
-- **Deploy only, no teardown flow yet.** No "undeploy" button. Cleanup of a deployed app is a manual
-  `mocker stop`/`mocker rm` from the CLI for now.
+- **No "undeploy" button; teardown is operator-only.** The control server has no authentication, so
+  an HTTP teardown endpoint would let anyone on the LAN delete anyone's app. Teardown is
+  `sudo sh mockerhost/teardown.sh <name>` on the VM instead - see
+  [mockerhost-teardown-design.md](mockerhost-teardown-design.md).
 
 ## 2. Components
 
@@ -148,8 +150,10 @@ works for anyone on the network with no extra setup.
 
 ## 7. Known limitations (state these, don't hide them)
 
-- No teardown flow yet — ports, nginx config files, and per-deploy rootfs copies accumulate until
-  removed by hand.
+- Teardown is a command-line tool for the operator, not part of the web UI, and there is no bulk
+  delete / TTL / automatic cleanup (see [mockerhost-teardown-design.md](mockerhost-teardown-design.md)
+  section 8). A failed deploy can leave a rootfs copy and port lease behind until `teardown.sh <name>`
+  is run on it.
 - The base rootfs pointed to by `MOCKERHOST_BASE_ROOTFS` needs whatever language runtime a given
   app requires (node/python/etc.) already installed in it — `mockerhost` copies that template
   per deploy (§3), it doesn't assemble one from scratch. One template, one toolchain.

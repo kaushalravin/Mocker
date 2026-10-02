@@ -58,6 +58,16 @@ if [ ! -d "$BASE_ROOTFS" ]; then
     fail "base_rootfs_missing_set_MOCKERHOST_BASE_ROOTFS_or_prepare_root_test-rootfs"
 fi
 
+# Never reuse an existing app directory, and never delete one from here: the
+# only code allowed to delete a rootfs copy is teardown.sh's mockerhost-rmtree
+# (docs/mockerhost-teardown-design.md, CLAUDE.md section 9). This check comes
+# before leasing a port so a refused redeploy can't touch the existing app's
+# lease. A leftover from a failed deploy is cleaned up the same way:
+#   sudo sh mockerhost/teardown.sh <name>
+if [ -e "$APP_ROOTFS" ] || [ -L "$APP_ROOTFS" ]; then
+    fail "app_dir_exists_run_teardown_sh_first"
+fi
+
 # --- lease a host port -------------------------------------------------------
 # Same flock()-guarded scan-and-record shape as mocker's own net_alloc_ip()
 # (cli/src/network/net_setup.c) - just in shell, since mockerhost's glue
@@ -101,22 +111,6 @@ fi
 # gets its own full copy of the base rootfs (plain `cp -a`, not OverlayFS -
 # CLAUDE.md section 5), with the repo cloned to <rootfs-copy>/app, so `cd
 # /app` inside the container lands exactly on the cloned source.
-if [ -e "$APP_ROOTFS" ]; then
-    # Prefix-verify before removing anything, per docs/filesystem-safety.md's
-    # rule applied to mockerhost's own state too - $APP_DIR is built entirely
-    # from MOCKERHOST_ROOT and $NAME (already validated by server.c against
-    # mocker's own ^[a-zA-Z0-9_-]{1,64}$ before this script is ever invoked),
-    # never from unvalidated raw input.
-    resolved_rootfs="$(realpath "$APP_ROOTFS" 2>/dev/null || echo "")"
-    case "$resolved_rootfs" in
-        "$MOCKERHOST_ROOT"/apps/*) rm -rf "$APP_ROOTFS" ;;
-        *)
-            release_port
-            fail "refusing_to_reuse_unexpected_app_dir"
-            ;;
-    esac
-fi
-
 : > "$LOG_FILE"
 
 if ! cp -a "$BASE_ROOTFS" "$APP_ROOTFS" >> "$LOG_FILE" 2>&1; then

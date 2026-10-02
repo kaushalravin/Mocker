@@ -6,14 +6,15 @@ command, and a run command from a web form, clones and builds the repo inside a
 as the Lubuntu VM gets back a live URL. Full design and the safety reasoning
 behind it: [../docs/mockerhost-design.md](../docs/mockerhost-design.md).
 
-**Status: implemented, not yet verified on the Lubuntu VM.** Written on Windows
+**Status: deploy is verified on the Lubuntu VM; teardown (`teardown.sh`, `src/rmtree.c`) is
+implemented but not yet verified there.** Written on Windows
 (see [../CLAUDE.md](../CLAUDE.md) section 12) — treat as untested until
 confirmed there, same discipline the `mocker stop`/`rm`/`ps`/`inspect` commands
 went through first.
 
 **Scope, decided explicitly:** local network only (no public DNS/TLS), deploy
-only (no teardown/undeploy button yet — clean up a deployed app manually with
-`mocker stop`/`mocker rm`), no terminal/exec access from the web UI (there is
+only (teardown is an operator command, `teardown.sh`, not a web button — the control
+server has no authentication), no terminal/exec access from the web UI (there is
 still no user namespace — root in a container is root on the host, so a shell
 reachable by anyone on the network is a host-compromise path). See
 [../docs/mockerhost-design.md](../docs/mockerhost-design.md) section 1.
@@ -25,6 +26,8 @@ mockerhost/
 ├── src/server.c        # raw-socket HTTP server: serves the form, handles POST /deploy
 ├── static/index.html   # the deploy form (github url, build cmd, run cmd, container port)
 ├── clone_and_build.sh  # clone + mocker run + nginx registration, shelled out to by server.c
+├── teardown.sh         # operator command: stop/rm a deployed app, remove its nginx conf, lease, rootfs
+├── src/rmtree.c        # mockerhost-rmtree: the only code that deletes a deploy's rootfs copy
 ├── nginx/mockerhost.conf  # one-time nginx site template (see Setup below)
 └── README.md
 ```
@@ -105,6 +108,28 @@ repo's own files.) A working deploy means `http://<vm-ip>/apps/<name>/` serves
 that repo's files — confirms the mechanism end-to-end before pointing
 `MOCKERHOST_BASE_ROOTFS` at a rootfs with node/python/etc. for a real app.
 
+## Teardown
+
+Remove a deployed app (stops and removes its container, drops its nginx route, frees its
+host port, and deletes its private rootfs copy and build log):
+
+```bash
+make mockerhost/mockerhost-rmtree        # once, from the repo root
+sudo sh mockerhost/teardown.sh <name>    # <name> is the one in the /apps/<name>/ URL
+```
+
+It is idempotent and fails closed: if the container can't be stopped/removed, or any
+sign of it (registry entry, cgroup, pid, `mocker run` supervisor) is still present, the
+rootfs is **not** deleted. Re-run it after fixing the cause. It only touches apps
+mockerhost created (an app dir, nginx conf, or port lease must exist for the name); a
+container you started by hand with `mocker run` is left alone. The base rootfs template
+is never touched. The rootfs deletion is `unlinkat()`-based, never `rm -rf`, never
+follows symlinks, and refuses if anything is mounted under the app directory — see
+[../docs/mockerhost-teardown-design.md](../docs/mockerhost-teardown-design.md).
+
+Redeploying over an existing app directory is refused
+(`app_dir_exists_run_teardown_sh_first`); `clone_and_build.sh` no longer deletes anything.
+
 ## Security notes
 
 - `server.c` never builds a host shell command from form input — it validates
@@ -126,10 +151,9 @@ that repo's files — confirms the mechanism end-to-end before pointing
 
 ## Known limitations
 
-- No teardown flow — ports, nginx config files, and per-deploy rootfs copies
-  accumulate until removed by hand (`mocker stop`/`mocker rm`, then delete the
-  app's directory under `/var/lib/mockerhost/apps/` and its nginx config under
-  `/var/lib/mockerhost/nginx/apps/`, then `nginx -s reload`).
+- Teardown is operator-only (CLI, needs root on the VM); there is no web button, bulk
+  delete, or automatic expiry. A failed deploy can leave a rootfs copy and port lease
+  behind until `teardown.sh <name>` is run on it.
 - Each deploy costs a full `cp -a` of the base rootfs template — fine for a demo,
   not something that scales to many concurrent deploys or a large toolchain image
   without the copy itself becoming slow / eating disk.

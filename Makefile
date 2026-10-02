@@ -26,6 +26,12 @@ MOCKERHOST_TARGET = mockerhost/mockerhost-server
 
 MOCKERHOST_SRC = mockerhost/src/server.c
 
+# mockerhost's teardown helper - the only code that deletes a deploy's rootfs
+# copy (docs/mockerhost-teardown-design.md). Used by mockerhost/teardown.sh.
+RMTREE_TARGET = mockerhost/mockerhost-rmtree
+
+RMTREE_SRC = mockerhost/src/rmtree.c
+
 $(TARGET): $(SRC)
 	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)
 
@@ -34,6 +40,9 @@ $(CGROUP_TEST_TARGET): $(CGROUP_TEST_SRC)
 
 $(MOCKERHOST_TARGET): $(MOCKERHOST_SRC)
 	$(CC) $(CFLAGS) $(MOCKERHOST_SRC) -o $(MOCKERHOST_TARGET)
+
+$(RMTREE_TARGET): $(RMTREE_SRC)
+	$(CC) $(CFLAGS) $(RMTREE_SRC) -o $(RMTREE_TARGET)
 
 # Run the control server from inside mockerhost/ (it reads static/ and
 # clone_and_build.sh relative to its cwd). Override the template rootfs with
@@ -49,10 +58,10 @@ demos: $(DEMO_TARGETS)
 
 BASE_ROOTFS ?= /root/test-rootfs
 
-run-mockerhost: $(MOCKERHOST_TARGET) $(TARGET)
+run-mockerhost: $(MOCKERHOST_TARGET) $(RMTREE_TARGET) $(TARGET)
 	cd mockerhost && sudo MOCKERHOST_BASE_ROOTFS=$(BASE_ROOTFS) ./mockerhost-server
 
 .PHONY: run-mockerhost demos clean
 
 clean:
-	rm -f $(TARGET) $(CGROUP_TEST_TARGET) $(MOCKERHOST_TARGET) $(DEMO_TARGETS)
+	rm -f $(TARGET) $(CGROUP_TEST_TARGET) $(MOCKERHOST_TARGET) $(RMTREE_TARGET) $(DEMO_TARGETS)
