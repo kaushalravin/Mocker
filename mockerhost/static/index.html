@@ -4,17 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mockerhost</title>
-<style>
-  body { font-family: sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; color: #222; }
-  h1 { margin-bottom: 0.25rem; }
-  p.tagline { color: #666; margin-top: 0; }
-  label { display: block; margin-top: 1.25rem; font-weight: bold; }
-  input { width: 100%; padding: 0.5rem; box-sizing: border-box; font-size: 1rem; }
-  small { color: #666; }
-  button { margin-top: 1.75rem; padding: 0.6rem 1.4rem; font-size: 1rem; cursor: pointer; }
-</style>
+<link rel="stylesheet" href="style.css">
 </head>
 <body>
+<a class="top-link github-link" href="https://github.com/kaushalravin/Mocker/" aria-label="GitHub">
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path fill="currentColor" d="M12 .297a12 12 0 0 0-3.79 23.386c.6.111.82-.26.82-.577v-2.234c-3.338.726-4.043-1.416-4.043-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.729.083-.729 1.205.084 1.84 1.237 1.84 1.237 1.07 1.834 2.807 1.304 3.492.997.108-.775.418-1.305.762-1.605-2.665-.305-5.467-1.332-5.467-5.93 0-1.31.469-2.381 1.236-3.221-.124-.303-.536-1.524.117-3.176 0 0 1.008-.322 3.3 1.23a11.5 11.5 0 0 1 6.004 0c2.29-1.552 3.296-1.23 3.296-1.23.655 1.652.243 2.873.12 3.176.77.84 1.234 1.911 1.234 3.221 0 4.61-2.807 5.62-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.216.694.825.576A12.001 12.001 0 0 0 12 .297" />
+  </svg>
+</a>
+<a class="top-link docs-link" href="https://github.com/kaushalravin/Mocker/tree/main/docs" aria-label="Documentation">
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 7v14" />
+    <path d="M3 18V5a2 2 0 0 1 2-2h3a4 4 0 0 1 4 4 4 4 0 0 1 4-4h3a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2h-3a4 4 0 0 0-4 2 4 4 0 0 0-4-2H5a2 2 0 0 1-2-2z" />
+  </svg>
+</a>
+<main>
 <h1>mockerhost</h1>
 <p class="tagline">Deploy a GitHub repo into a mocker container, on this network.</p>
 
@@ -29,10 +33,11 @@
   <input type="text" id="run_cmd" name="run_cmd" placeholder="npm start" required>
 
   <label for="container_port">Port your app listens on inside the container</label>
-  <input type="text" id="container_port" name="container_port" placeholder="3000" required>
-  <small>The app must bind this port on 0.0.0.0, not just localhost, to be reachable through the proxy.</small>
+  <input type="text" id="container_port" name="container_port" placeholder="3000" aria-describedby="container_port_help" required>
+  <small id="container_port_help">The app must bind this port on 0.0.0.0, not just localhost, to be reachable through the proxy.</small>
 
   <button type="submit">Deploy</button>
 </form>
+</main>
 </body>
 </html>
