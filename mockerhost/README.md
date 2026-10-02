@@ -48,9 +48,14 @@ mockerhost/
 ## One-time setup (per VM)
 
 ```bash
-sudo ln -s "$(pwd)/mockerhost/nginx/mockerhost.conf" /etc/nginx/sites-enabled/mockerhost.conf
+sudo rm -f /etc/nginx/sites-enabled/default   # removes only the symlink to Ubuntu's stock site
+sudo ln -sf "$(pwd)/mockerhost/nginx/mockerhost.conf" /etc/nginx/sites-enabled/mockerhost.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+The stock `default` site also claims port 80 as `default_server`, so left in place it
+answers every request itself with its own 404 and never reaches mockerhost's `location`
+blocks (and `nginx -t` fails with "duplicate default server" if both are enabled).
 
 This installs the shared nginx site whose `include /var/lib/mockerhost/nginx/apps/*.conf;`
 directive is how each deploy adds itself to the proxy — it is not touched again
