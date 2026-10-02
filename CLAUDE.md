@@ -52,7 +52,13 @@ stored `status` string alone (CLAUDE.md section 10). `registry.c`/`.h` gained `r
 `registry_list()`/`registry_remove()` and `host_port`/`container_port` fields on the registry entry;
 `net_setup.c`/`.h` gained `net_release_ip()`/`net_veth_delete()`/`net_port_unmap()`. `mocker
 logs`/`exec` are not built yet. Stage 6 (`mockerhost`, per `docs/mockerhost-design.md`) is now
-**written but not yet built or run on the Lubuntu VM** — `mockerhost/src/server.c` is a raw-socket
+**done and verified on the Lubuntu VM** with a plain static HTML/JS site deployed from a GitHub repo
+(BusyBox `httpd -f -p 8000 -h /app`) and reached from the LAN at `http://<vm-ip>/apps/<name>/`.
+Lessons from that run, already fixed in the code: `/bin/sh` there is dash (no multi-digit fds, no
+`disown`); the stock nginx `default` site must be removed; nginx proxies to the container's own
+`10.200.0.x:<containerport>` because a host-originated connection to `127.0.0.1:<hostport>` (the
+`--port` OUTPUT DNAT) keeps a loopback source and hangs; the success link must target port 80, not
+the :8080 control server. Description of what it does — `mockerhost/src/server.c` is a raw-socket
 HTTP server (serves `mockerhost/static/index.html`'s deploy form, handles `POST /deploy` by
 validating fields and `fork()`+`execvp()`-ing `mockerhost/clone_and_build.sh` via `/bin/sh`, never a
 host shell string built from user input); `clone_and_build.sh` leases a host port
@@ -85,7 +91,7 @@ hiding them behind abstractions — the implementation *is* the demonstration.
   ("containers"). This is where the academic weight lives.
 - **mockerhost** — product layer on top of `mocker`: a web form takes a GitHub repo URL + build/run
   commands, clones and builds it, invokes `mocker run`, and fronts it with nginx. Stage 6, now
-  written (not yet VM-verified) — see section 1 and `docs/mockerhost-design.md`.
+  VM-verified with a static site — see section 1 and `docs/mockerhost-design.md`.
 - **demo** — small intentionally-misbehaving programs (`leak.c`, `forkbomb.c`) and a demo app, used
   to prove isolation/limits actually hold (e.g. a forkbomb inside a container must not take down
   the host, `pids.max` must cap it).
@@ -170,6 +176,25 @@ CLI command MVP ordering (do not implement all commands up front):
 1. `run`, `stop`, `rm`, `ps`, `inspect`, `logs`
 2. `exec`, `stats`, `--pids-limit`
 3. `start`, `restart`, `update`, `prune` (optional/later)
+
+### Next steps (in order, after stage 6)
+
+1. **Verify `mocker stop`/`rm`/`ps`/`inspect` on live containers.** They compile but are not
+   functionally verified. Check against kernel state (`/proc/<pid>/ns/*`, `/sys/fs/cgroup/mocker/`),
+   not just the registry (section 10). Teardown (step 4) depends on this.
+2. **Demo programs** — write `demo/leak.c` and `demo/forkbomb.c`, and prove the limits hold: a
+   forkbomb capped by `pids.max`, a leak killed by `memory.max`, host unaffected.
+3. **Stage 7, the multi-container demo** — two containers with independent PIDs, filesystem views,
+   hostnames, IPs/ports, and independently enforced cgroup limits; mostly a scripted demonstration
+   of what stages 3-6 already provide.
+4. **`mockerhost` teardown** — a flow to stop/remove a deployed app and delete its nginx conf, port
+   lease, and per-deploy rootfs copy. Deleting the rootfs copy needs the same design-before-code
+   review `mocker rm` got (section 9) — design it before implementing; never `rm -rf` an
+   unverified path.
+5. **Final write-up** — update `README.md` and `docs/`, and the known-limitations section: no user
+   namespace, isolation is namespaces + cgroups only (shared kernel, not a VM boundary).
+
+Deferred (not in the list above): `mocker logs`/`exec`/`stats`.
 
 ## 7. Coding conventions
 

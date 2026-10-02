@@ -35,5 +35,15 @@ $(CGROUP_TEST_TARGET): $(CGROUP_TEST_SRC)
 $(MOCKERHOST_TARGET): $(MOCKERHOST_SRC)
 	$(CC) $(CFLAGS) $(MOCKERHOST_SRC) -o $(MOCKERHOST_TARGET)
 
+# Run the control server from inside mockerhost/ (it reads static/ and
+# clone_and_build.sh relative to its cwd). Override the template rootfs with
+#   make run-mockerhost BASE_ROOTFS=/path/to/rootfs
+BASE_ROOTFS ?= /root/test-rootfs
+
+run-mockerhost: $(MOCKERHOST_TARGET) $(TARGET)
+	cd mockerhost && sudo MOCKERHOST_BASE_ROOTFS=$(BASE_ROOTFS) ./mockerhost-server
+
+.PHONY: run-mockerhost clean
+
 clean:
 	rm -f $(TARGET) $(CGROUP_TEST_TARGET) $(MOCKERHOST_TARGET)
