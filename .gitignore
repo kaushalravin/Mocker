@@ -7,3 +7,6 @@ minidocker
 cgroup-test
 *.o
 *.out
+# demo binaries (built by `make demos`)
+/demo/leak
+/demo/forkbomb

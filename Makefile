@@ -38,12 +38,21 @@ $(MOCKERHOST_TARGET): $(MOCKERHOST_SRC)
 # Run the control server from inside mockerhost/ (it reads static/ and
 # clone_and_build.sh relative to its cwd). Override the template rootfs with
 #   make run-mockerhost BASE_ROOTFS=/path/to/rootfs
+# Demo programs (demo/README.md). Built -static: they run inside a minimal
+# BusyBox rootfs that has no libc of its own to link against.
+DEMO_TARGETS = demo/leak demo/forkbomb
+
+demo/%: demo/%.c
+	$(CC) -Wall -Wextra -static $< -o $@
+
+demos: $(DEMO_TARGETS)
+
 BASE_ROOTFS ?= /root/test-rootfs
 
 run-mockerhost: $(MOCKERHOST_TARGET) $(TARGET)
 	cd mockerhost && sudo MOCKERHOST_BASE_ROOTFS=$(BASE_ROOTFS) ./mockerhost-server
 
-.PHONY: run-mockerhost clean
+.PHONY: run-mockerhost demos clean
 
 clean:
-	rm -f $(TARGET) $(CGROUP_TEST_TARGET) $(MOCKERHOST_TARGET)
+	rm -f $(TARGET) $(CGROUP_TEST_TARGET) $(MOCKERHOST_TARGET) $(DEMO_TARGETS)

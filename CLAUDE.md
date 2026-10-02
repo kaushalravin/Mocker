@@ -41,10 +41,9 @@ the bridge, `ping` to the gateway succeeds, `/proc/<pid>/ns/net` resolves to a n
 from the host's, `mocker0`/host-side veth/iptables NAT+DNAT rules all show up in kernel-visible
 state on the host, and a port mapped with `--port` was reachable end-to-end with `curl`. See
 `docs/architecture.md` section 7 for the full design. `mocker stop`/`rm`/`ps`/`inspect` are now
-implemented (`cli/src/main.c`, per `docs/architecture.md` sections 5 and 8) and **compile cleanly on
-the Lubuntu VM** (`make` succeeds with no warnings), but their actual runtime behavior is **not yet
-functionally verified there** — the compile pass only proves the code builds, not that
-`stop`/`rm`/`ps`/`inspect` behave correctly against a live container. `stop` sends `SIGTERM` then escalates to `SIGKILL` after a 5s
+implemented (`cli/src/main.c`, per `docs/architecture.md` sections 5 and 8) and are **verified on
+the Lubuntu VM against live containers**, checked against kernel state (`/proc/<pid>/ns/*`,
+`/sys/fs/cgroup/mocker/`, `ip`, `iptables`, the lease file), not just the registry. `stop` sends `SIGTERM` then escalates to `SIGKILL` after a 5s
 timeout (PID-namespace-init signal immunity, section 8); `rm` refuses a still-running container and
 only cleans up cgroup/veth/port-rules/IP-lease/registry state — never the rootfs, which Mocker never
 copies or owns; `ps`/`inspect` always re-derive liveness from `/proc/<pid>`, never trusting the
@@ -179,9 +178,7 @@ CLI command MVP ordering (do not implement all commands up front):
 
 ### Next steps (in order, after stage 6)
 
-1. **Verify `mocker stop`/`rm`/`ps`/`inspect` on live containers.** They compile but are not
-   functionally verified. Check against kernel state (`/proc/<pid>/ns/*`, `/sys/fs/cgroup/mocker/`),
-   not just the registry (section 10). Teardown (step 4) depends on this.
+1. ~~Verify `mocker stop`/`rm`/`ps`/`inspect` on live containers~~ — done, VM-verified.
 2. **Demo programs** — write `demo/leak.c` and `demo/forkbomb.c`, and prove the limits hold: a
    forkbomb capped by `pids.max`, a leak killed by `memory.max`, host unaffected.
 3. **Stage 7, the multi-container demo** — two containers with independent PIDs, filesystem views,
