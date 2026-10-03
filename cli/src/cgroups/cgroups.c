@@ -14,12 +14,7 @@
 
 #define CGROUP_BASE "/sys/fs/cgroup/mocker"
 
-/*
- * Every path this file touches is CGROUP_BASE + "/" + <name>. <name> comes
- * from the caller (ultimately the user, via the CLI) and is the one piece
- * of untrusted input every cgroup path is built from - see
- * docs/filesystem-safety.md. Validate it before it touches any path.
- */
+/* <name> is untrusted user input; validate it before building any path (docs/filesystem-safety.md). */
 static int is_valid_name(const char *name)
 {
     if (name == NULL)
@@ -56,13 +51,10 @@ int cgroup_dir_path(const char *name, char *out, size_t out_size)
 
 int cgroups_v2_available(void)
 {
-    /* cgroup.controllers only exists on the unified (v2) hierarchy - v1
-     * splits controllers into separate trees with a different layout
-     * entirely, so this file's presence is a reliable version check. */
+    /* cgroup.controllers exists only on the unified (v2) hierarchy. */
     return access("/sys/fs/cgroup/cgroup.controllers", F_OK) == 0;
 }
 
-/* Cgroup limits are plain file I/O - no special syscall needed. */
 static int write_to_path(const char *path, const char *value)
 {
     int fd = open(path, O_WRONLY);
@@ -82,15 +74,8 @@ static int write_to_path(const char *path, const char *value)
     return 0;
 }
 
-/*
- * A freshly created cgroup only gets controller interface files
- * (memory.max, pids.max, cpu.max) if its PARENT has enabled those
- * controllers for children - cgroups v2 controllers do not propagate down
- * on their own (see cgroup-v2.rst, "cgroup.subtree_control"). Enable them
- * once on the shared "mocker" parent so every per-container cgroup under
- * it picks them up. Re-enabling an already-enabled controller is a no-op,
- * so this is safe to call every time.
- */
+/* Controllers don't propagate to children on their own; enable them once on the shared
+ * parent. Re-enabling is a no-op. */
 static int enable_child_controllers(void)
 {
     char path[PATH_MAX];
@@ -121,8 +106,7 @@ int cgroup_create(const char *name)
     if (cgroup_dir_path(name, dir, sizeof(dir)) == -1)
         return -1;
 
-    /* The shared "mocker" parent may already exist from an earlier
-     * container - that is fine, only a fresh per-container dir matters. */
+    /* The shared parent may already exist from an earlier container. */
     if (mkdir(CGROUP_BASE, 0755) == -1 && errno != EEXIST) {
         perror("mkdir " CGROUP_BASE);
         return -1;
@@ -190,9 +174,7 @@ int cgroup_apply_limits(const char *name, const cgroup_limits_t *limits)
         if (cgroup_write_file(name, "memory.max", buf) == -1)
             return -1;
 
-        /* Best-effort: cap swap too, so memory.max is the wall the process
-         * hits instead of quietly swapping past it. Not every system has
-         * swap accounting on, so a failure here isn't fatal. */
+        /* Best-effort: also cap swap so memory.max is a hard wall (may be unsupported). */
         cgroup_write_file(name, "memory.swap.max", "0");
     }
 
@@ -203,9 +185,7 @@ int cgroup_apply_limits(const char *name, const cgroup_limits_t *limits)
     }
 
     if (limits->cpu_max_percent >= 0) {
-        /* cpu.max is "$QUOTA $PERIOD" in microseconds - quota is how much
-         * CPU time is allowed per period. 100000us period is the kernel's
-         * own default, so percent maps directly onto it. */
+        /* cpu.max is "<quota> <period>" in us; 100000 is the kernel's default period. */
         long period_us = 100000;
         long quota_us = (period_us * limits->cpu_max_percent) / 100;
         snprintf(buf, sizeof(buf), "%ld %ld", quota_us, period_us);
@@ -231,9 +211,7 @@ int cgroup_remove(const char *name)
     if (cgroup_dir_path(name, dir, sizeof(dir)) == -1)
         return -1;
 
-    /* Only removable once empty of processes - the kernel enforces that
-     * itself (EBUSY otherwise), so this never needs to be a forceful
-     * recursive delete. */
+    /* The kernel refuses (EBUSY) while processes remain, so no forced delete is needed. */
     if (rmdir(dir) == -1) {
         perror(dir);
         return -1;

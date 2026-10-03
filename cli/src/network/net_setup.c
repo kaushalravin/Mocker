@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 
 #include "net_setup.h"
-#include "../registry/registry.h" /* MOCKER_ROOT - one controlled root, see filesystem-safety.md */
+#include "../registry/registry.h" /* MOCKER_ROOT */
 
 #include <ctype.h>
 #include <errno.h>
@@ -19,13 +19,8 @@
 #define NET_LEASES_DIR  MOCKER_ROOT "/network"
 #define NET_LEASES_FILE NET_LEASES_DIR "/leases"
 
-/*
- * Runs argv[0] with argv, waiting for it to exit. Never system()/popen() -
- * every argument here is either a fixed literal or already-validated
- * (name/IP/pid), passed as a real argv array so there is no shell to inject
- * into (same reasoning filesystem-safety.md gives for avoiding shelled-out
- * deletion commands).
- */
+/* Runs argv[0] with argv and waits. Never system()/popen(): arguments are literals or validated
+ * values in a real argv array, so there is no shell to inject into. */
 static int net_run(char *const argv[])
 {
     pid_t pid = fork();
@@ -54,10 +49,8 @@ static int net_run(char *const argv[])
     return 0;
 }
 
-/* Like net_run(), but for idempotency checks (e.g. `iptables -C`) where a
- * non-zero exit just means "not present yet", not a real error - stderr is
- * silenced so a routine "no such rule" doesn't look like a failure. Returns
- * 1 if the check passed (exit 0), 0 if it didn't, -1 on a real error. */
+/* Like net_run() for existence checks (e.g. `iptables -C`): non-zero just means "not present".
+ * Returns 1 if exit 0, 0 if not, -1 on a real error. */
 static int net_check(char *const argv[])
 {
     pid_t pid = fork();
@@ -105,9 +98,7 @@ int net_bridge_ensure(void)
             return -1;
     }
 
-    /* Host-wide, needed once for containers to reach past the bridge at
-     * all - a direct file write, same style as cgroups.c's write_to_path(),
-     * not a shelled-out `sysctl`. */
+    /* Host-wide; a direct file write rather than a shelled-out sysctl. */
     int fd = open("/proc/sys/net/ipv4/ip_forward", O_WRONLY);
     if (fd == -1) {
         perror("/proc/sys/net/ipv4/ip_forward");
@@ -140,11 +131,7 @@ int net_bridge_ensure(void)
     return 0;
 }
 
-/* Same alnum/_/- check every other module validates <name> with before
- * building a path or file entry from it (defense-in-depth - see cgroups.c's
- * is_valid_name() / registry.c's registry_valid_name(); the CLI boundary in
- * main.c has already checked this once, but this module doesn't rely on
- * that alone). */
+/* Defense in depth: same name check as cgroups.c/registry.c, not relying on the CLI alone. */
 static int is_valid_name(const char *name)
 {
     if (name == NULL)
@@ -190,8 +177,7 @@ int net_alloc_ip(const char *name, char *ip_out, size_t ip_out_size)
         return -1;
     }
 
-    /* Held for the whole read-modify-write below so two concurrent
-     * `mocker run`s can't both pick the same free IP. */
+    /* Held across the read-modify-write so concurrent runs can't pick the same IP. */
     if (flock(fd, LOCK_EX) == -1) {
         perror(NET_LEASES_FILE);
         close(fd);
@@ -238,13 +224,12 @@ int net_alloc_ip(const char *name, char *ip_out, size_t ip_out_size)
         return -1;
     }
 
-    /* C requires a positioning call between a read and a following write on
-     * an "r+" stream, even though the fgets() loop already left us at EOF. */
+    /* C requires a seek between a read and a write on an "r+" stream. */
     fseek(f, 0, SEEK_END);
     fprintf(f, "%s %s\n", name, ip_out);
     fflush(f);
 
-    fclose(f); /* also releases the flock() and closes the underlying fd */
+    fclose(f); /* also releases the flock() */
     return 0;
 }
 
@@ -325,7 +310,7 @@ int net_release_ip(const char *name)
     int fd = open(NET_LEASES_FILE, O_RDWR);
     if (fd == -1) {
         if (errno == ENOENT)
-            return 0; /* nothing was ever leased - nothing to release */
+            return 0; /* nothing leased */
         perror(NET_LEASES_FILE);
         return -1;
     }
@@ -343,9 +328,7 @@ int net_release_ip(const char *name)
         return -1;
     }
 
-    /* Bounded by the /24 subnet's own capacity (net_alloc_ip() only ever
-     * hands out octets 2-254), so a fixed-size table is enough - same
-     * reasoning as net_alloc_ip()'s used[255] array. */
+    /* The /24 only has octets 2-254, so a fixed-size table is enough. */
     char kept_lines[255][128];
     int kept = 0;
 
@@ -358,8 +341,7 @@ int net_release_ip(const char *name)
             snprintf(kept_lines[kept++], sizeof(kept_lines[0]), "%s", line);
     }
 
-    /* Rewriting the whole file from scratch is the simplest correct way to
-     * drop one line, under the same lock net_alloc_ip() reads/writes under. */
+    /* Rewrite the file without the dropped line, under the same lock. */
     if (ftruncate(fileno(f), 0) == -1) {
         perror(NET_LEASES_FILE);
         fclose(f);
@@ -370,14 +352,14 @@ int net_release_ip(const char *name)
         fputs(kept_lines[i], f);
     fflush(f);
 
-    fclose(f); /* also releases the flock() and closes the underlying fd */
+    fclose(f); /* also releases the flock() */
     return 0;
 }
 
 int net_veth_delete(const char *host_veth)
 {
     if (if_nametoindex(host_veth) == 0)
-        return 0; /* already gone - idempotent, same posture as net_bridge_ensure() */
+        return 0; /* already gone: idempotent */
 
     char *del_argv[] = {"ip", "link", "delete", (char *)host_veth, NULL};
     return net_run(del_argv);
@@ -393,8 +375,7 @@ int net_port_unmap(const char *container_ip, int host_port, int container_port)
     char dest[64];
     snprintf(dest, sizeof(dest), "%s:%d", container_ip, container_port);
 
-    /* Try to remove all three rules even if one is already gone/fails, so a
-     * partial `-A` (e.g. run died mid-setup) doesn't block the rest of rm. */
+    /* Try all three rules even if one is already gone, so a partial setup doesn't block rm. */
     int ret = 0;
 
     char *pre_argv[] = {"iptables", "-t",      "nat",           "-D",   "PREROUTING",
@@ -427,9 +408,7 @@ int net_port_map(const char *container_ip, int host_port, int container_port)
     char dest[64];
     snprintf(dest, sizeof(dest), "%s:%d", container_ip, container_port);
 
-    /* PREROUTING catches traffic arriving from outside the host; OUTPUT is
-     * also needed for connections the host itself originates (e.g. `curl
-     * localhost:<hostport>`), which never passes through PREROUTING. */
+    /* PREROUTING handles outside traffic; OUTPUT handles host-originated (curl localhost:<port>). */
     char *pre_argv[] = {"iptables", "-t",      "nat",           "-A",   "PREROUTING",
                          "-p",       "tcp",     "--dport",       host_port_buf,
                          "-j",       "DNAT",    "--to-destination", dest, NULL};

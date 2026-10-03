@@ -39,9 +39,7 @@ static int mkdir_if_missing(const char *path)
     return 0;
 }
 
-/* MOCKER_ROOT/containers/<name>/ is fixed-depth (three mkdir()s from
- * MOCKER_ROOT), so this is just those three calls in order - no generic
- * "mkdir -p" helper needed for one call site. */
+/* Fixed depth (MOCKER_ROOT/containers/<name>): three mkdir() calls, no mkdir -p helper. */
 static int ensure_container_dir(const char *name, char *dir_out, size_t dir_out_size)
 {
     if (mkdir_if_missing(MOCKER_ROOT) == -1)
@@ -104,11 +102,7 @@ int registry_write(const registry_entry_t *entry)
     return 0;
 }
 
-/*
- * Line-oriented parser matched to registry_write()'s own fprintf() layout
- * above (one "key": value per line) - not a general JSON parser, since
- * state.json is only ever produced by registry_write() in the first place.
- */
+/* Parses registry_write()'s own one-"key": value-per-line layout; not a general JSON parser. */
 int registry_read(const char *name, registry_record_t *out)
 {
     if (!registry_valid_name(name)) {
@@ -130,7 +124,7 @@ int registry_read(const char *name, registry_record_t *out)
 
     FILE *f = fopen(state_path, "r");
     if (f == NULL)
-        return -1; /* ENOENT here just means "no such container" - not worth perror() */
+        return -1; /* ENOENT: no such container, not worth a perror() */
 
     char line[512];
     while (fgets(line, sizeof(line), f) != NULL) {
@@ -139,9 +133,7 @@ int registry_read(const char *name, registry_record_t *out)
         int intval;
 
         if (sscanf(line, " \"%63[^\"]\" : \"%399[^\"]\"", key, strval) == 2) {
-            /* Precision matched to each destination's own size (sizeof(dst) - 1),
-             * not just "%s", so gcc can prove the copy fits and drop the
-             * -Wformat-truncation= warning - snprintf() was already safe either way. */
+            /* Precision = sizeof(dst) - 1 so gcc can prove the copy fits. */
             if (strcmp(key, "name") == 0)
                 snprintf(out->name, sizeof(out->name), "%.64s", strval);
             else if (strcmp(key, "rootfs") == 0)
@@ -180,7 +172,7 @@ int registry_list(char names[][REGISTRY_NAME_MAX], int max_names)
     DIR *d = opendir(containers_dir);
     if (d == NULL) {
         if (errno == ENOENT)
-            return 0; /* nothing recorded yet - not an error */
+            return 0; /* nothing recorded yet */
         perror(containers_dir);
         return -1;
     }
@@ -191,10 +183,8 @@ int registry_list(char names[][REGISTRY_NAME_MAX], int max_names)
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
         if (!registry_valid_name(ent->d_name))
-            continue; /* not a name mocker could have created - skip rather than fail the listing */
-        /* d_name could theoretically be up to NAME_MAX+1 bytes; registry_valid_name()
-         * already rejected anything over 64 chars, but the precision here lets gcc
-         * verify the copy fits REGISTRY_NAME_MAX without relying on that check alone. */
+            continue; /* not a name mocker could have created */
+        /* Precision lets gcc verify the copy fits REGISTRY_NAME_MAX. */
         snprintf(names[count], REGISTRY_NAME_MAX, "%.64s", ent->d_name);
         count++;
     }
@@ -213,10 +203,7 @@ int registry_remove(const char *name)
     char container_dir[PATH_MAX];
     snprintf(container_dir, sizeof(container_dir), "%s/containers/%s", MOCKER_ROOT, name);
 
-    /* Prefix-verify before removing anything, per docs/filesystem-safety.md -
-     * even though this is only ever unlink() + rmdir(), never a recursive
-     * walk, the same "fail closed if it doesn't resolve where expected" rule
-     * applies unconditionally. */
+    /* Fail closed unless the path resolves under containers/ (docs/filesystem-safety.md). */
     char resolved[PATH_MAX];
     if (realpath(container_dir, resolved) == NULL) {
         perror(container_dir);
@@ -235,9 +222,7 @@ int registry_remove(const char *name)
         return -1;
     }
 
-    /* Sized a few bytes past PATH_MAX (not just PATH_MAX) so gcc can prove
-     * "<resolved>/state.json" can never truncate, even though resolved (from
-     * realpath()) could itself be up to PATH_MAX-1 bytes long. */
+    /* A few bytes past PATH_MAX so gcc can prove "<resolved>/state.json" never truncates. */
     char state_path[PATH_MAX + 16];
     int state_n = snprintf(state_path, sizeof(state_path), "%s/state.json", resolved);
     if (state_n < 0 || (size_t)state_n >= sizeof(state_path)) {

@@ -9,13 +9,8 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-/*
- * pivot_root() swaps a process's whole mount tree root - unlike chroot(),
- * which only changes the apparent root directory and leaves the old root
- * reachable through it. glibc doesn't reliably wrap this syscall, so it's
- * invoked directly. See docs/architecture.md section 4 for why each step
- * below is in this exact order.
- */
+/* pivot_root() swaps the whole mount root (chroot() leaves the old root reachable). glibc has
+ * no wrapper. Step order is explained in docs/architecture.md section 4. */
 static int do_pivot_root(const char *new_root, const char *put_old)
 {
     return (int)syscall(SYS_pivot_root, new_root, put_old);
@@ -25,19 +20,13 @@ int mount_setup_pivot_root(const char *rootfs_path)
 {
     char old_root[PATH_MAX];
 
-    /* Step 1: detach this mount namespace from host propagation *before*
-     * touching anything else. MS_REC so it applies to every mount already
-     * under "/", not just the top-level one. After this, nothing the
-     * container does to its mounts can leak to the host, and nothing the
-     * host does can leak in. */
+    /* 1. Stop mount events propagating between host and container (MS_REC: existing mounts too). */
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) {
         perror("mount_setup: MS_PRIVATE remount");
         return -1;
     }
 
-    /* Step 2: pivot_root() requires new_root to be an actual mount point,
-     * not just a directory - bind-mounting it onto itself makes it one
-     * without needing a second filesystem. */
+    /* 2. new_root must be a mount point; bind-mount it onto itself. */
     if (mount(rootfs_path, rootfs_path, NULL, MS_BIND, NULL) == -1) {
         perror("mount_setup: bind mount rootfs onto itself");
         return -1;
@@ -49,14 +38,13 @@ int mount_setup_pivot_root(const char *rootfs_path)
         return -1;
     }
 
-    /* Step 3: pivot_root's put_old directory must exist inside new_root. */
+    /* 3. put_old must exist inside new_root. */
     if (mkdir(old_root, 0700) == -1) {
         perror(old_root);
         return -1;
     }
 
-    /* Step 4-5: pivot_root(".", ".old_root") is called with the process's
-     * cwd as new_root, which is why we chdir() into it first. */
+    /* 4-5. pivot_root(".", ".old_root") treats the cwd as new_root. */
     if (chdir(rootfs_path) == -1) {
         perror("mount_setup: chdir(rootfs_path)");
         return -1;
@@ -67,24 +55,19 @@ int mount_setup_pivot_root(const char *rootfs_path)
         return -1;
     }
 
-    /* Step 6: re-anchor into the new root now that "/" has changed under us. */
+    /* 6. "/" changed under us; re-anchor. */
     if (chdir("/") == -1) {
         perror("mount_setup: chdir(\"/\") after pivot_root");
         return -1;
     }
 
-    /* Step 7: fresh /proc for the new PID namespace - without this, /proc
-     * still shows whatever the old root's /proc pointed at (typically
-     * nothing usable, or the host's, depending on what was bind-mounted). */
+    /* 7. Fresh /proc for the new PID namespace. */
     if (mount("proc", "/proc", "proc", 0, NULL) == -1) {
         perror("mount_setup: mount fresh /proc");
         return -1;
     }
 
-    /* Step 8-9: lazily detach the old root from *this* mount namespace only
-     * - MNT_DETACH means it disappears once nothing still references it.
-     * This never touches the host's real root; it only removes it from the
-     * container's now-private mount table. */
+    /* 8-9. Lazily detach the old root from this private mount namespace; the host is untouched. */
     if (umount2("/.old_root", MNT_DETACH) == -1) {
         perror("mount_setup: umount2(/.old_root)");
         return -1;

@@ -1,12 +1,7 @@
 #define _GNU_SOURCE
 
-/*
- * Standalone stage-2 proof: attach a memory-leaking child to a cgroup
- * capped at 20MB and confirm the *kernel* OOM-kills it, watching only
- * memory.current (not the child's own claims) - see CLAUDE.md's testing
- * philosophy. Not linked into the mocker binary; run separately, as root,
- * on Linux with cgroups v2 (the Lubuntu VM).
- */
+/* Standalone stage-2 proof: a memory-leaking child in a 20MB cgroup must be OOM-killed by the
+ * kernel, judged by memory.current alone. Run as root on Linux with cgroups v2. */
 
 #include "cgroups.h"
 
@@ -83,8 +78,7 @@ int main(void)
 
     close(sync_pipe[0]);
 
-    /* Attach the child to the cgroup *before* it runs, so it's never
-     * unconstrained even for a moment. */
+    /* Attach before the child runs so it is never unconstrained. */
     if (cgroup_attach(TEST_CGROUP_NAME, pid) == -1) {
         kill(pid, SIGKILL);
         waitpid(pid, NULL, 0);

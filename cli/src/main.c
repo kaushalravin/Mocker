@@ -13,19 +13,9 @@
 #include "process/process.h"
 #include "registry/registry.h"
 
-/*
- * Stage 4 ("Combine", see CLAUDE.md section 6 / docs/architecture.md): the
- * real `mocker run` CLI. Namespaces + pivot_root (stage 3), cgroups
- * (stage 2), and networking (stage 5) are wired together here, in the order
- * docs/architecture.md section 3/7 specifies - cgroup created and limited
- * *before* the container is spawned, PID attached to it *immediately* after
- * clone() returns, host-side veth wired the same way, and only then a
- * registry entry recorded.
- *
- * Usage: mocker run --name <name> [--mem-mb <n>] [--pids <n>]
- *                    [--cpu-percent <n>] [--port <hostport>:<containerport>]
- *                    <rootfs-path> -- <cmd> [args...]
- */
+/* mocker CLI: run / stop / rm / ps / inspect.
+ * Usage: mocker run --name <name> [--mem-mb <n>] [--pids <n>] [--cpu-percent <n>]
+ *                   [--port <hostport>:<containerport>] <rootfs-path> -- <cmd> [args...] */
 
 static void print_usage(const char *prog)
 {
@@ -40,10 +30,7 @@ static void print_usage(const char *prog)
             prog, prog, prog, prog, prog);
 }
 
-/* Kernel-truth liveness check (CLAUDE.md section 10 / docs/architecture.md
- * section 8): whether /proc/<pid> exists right now, never the stored
- * state.json status string, which can go stale (e.g. a container killed
- * outside Mocker entirely). */
+/* Liveness from /proc/<pid>, never the stored status string (it can go stale). */
 static int process_alive(pid_t pid)
 {
     char proc_path[32];
@@ -51,8 +38,7 @@ static int process_alive(pid_t pid)
     return access(proc_path, F_OK) == 0;
 }
 
-/* Parses "hostport:containerport", or exits with a usage-style error. Both
- * ports must be in the valid TCP port range. */
+/* Parses "hostport:containerport" (both 1-65535) or exits with an error. */
 static void parse_port_map(const char *value, int *host_port_out, int *container_port_out)
 {
     int host_port, container_port;
@@ -67,9 +53,7 @@ static void parse_port_map(const char *value, int *host_port_out, int *container
     *container_port_out = container_port;
 }
 
-/* Parses one non-negative CLI integer, or exits with a usage-style error -
- * every numeric flag here goes through this so bad input fails the same way
- * regardless of which flag it came from. */
+/* Parses a numeric CLI flag or exits with a usage error. */
 static long parse_positive_long(const char *flag, const char *value)
 {
     char *end;
@@ -167,8 +151,7 @@ static int cmd_run(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Bridge/NAT are shared, host-wide state - ensured once up front, same
-     * as cgroups v2 being checked before any per-container work starts. */
+    /* Bridge and NAT are shared host-wide state; ensure them once up front. */
     if (net_bridge_ensure() == -1) {
         cgroup_remove(name);
         return EXIT_FAILURE;
@@ -195,10 +178,7 @@ static int cmd_run(int argc, char *argv[])
     printf("MOCKER: container '%s' host PID = %d\n", name, pid);
     fflush(stdout);
 
-    /* Attach before the container gets far into its own setup - see
-     * docs/architecture.md section 3 point 4. A failure here means the
-     * container must not be left running unconstrained, so it's killed
-     * rather than allowed to continue outside the cgroup. */
+    /* Attach right after clone(); on failure kill the container rather than leave it unlimited. */
     if (cgroup_attach(name, pid) == -1) {
         fprintf(stderr, "mocker: failed to attach PID %d to cgroup, killing container\n", pid);
         close(net_ready_fd);
@@ -208,10 +188,8 @@ static int cmd_run(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Host-side veth wiring - same "before the container gets far" timing as
-     * cgroup_attach() above. The container's PID 1 is still blocked reading
-     * net_ready_fd at this point, so it can't race this. On failure the
-     * container must not be left running half-networked, so it's killed. */
+    /* Host-side veth wiring; PID 1 is still blocked on net_ready_fd, so there is no race.
+     * Kill the container on failure. */
     if (net_veth_setup(host_veth, peer_veth, pid) == -1) {
         fprintf(stderr, "mocker: failed to wire networking for '%s', killing container\n", name);
         close(net_ready_fd);
@@ -221,17 +199,13 @@ static int cmd_run(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Releases the container's PID 1, blocked since clone(), to configure
-     * peer_veth (now renamed/moved into its netns) and continue into
-     * pivot_root()/execvp() - see docs/architecture.md section 7. */
+    /* Release PID 1 to configure eth0 and continue to pivot_root()/execvp(). */
     if (write(net_ready_fd, "x", 1) != 1)
         perror("net_ready_fd write");
     close(net_ready_fd);
 
     if (host_port != -1) {
-        /* Non-fatal: port mapping is an additive convenience, not part of
-         * the container's core isolation, so a failure here shouldn't kill
-         * an otherwise-running container. */
+        /* Non-fatal: port mapping is a convenience, not core isolation. */
         if (net_port_map(container_ip, host_port, container_port) == -1)
             fprintf(stderr, "mocker: warning: port mapping %d:%d failed\n", host_port,
                     container_port);
@@ -254,10 +228,7 @@ static int cmd_run(int argc, char *argv[])
     entry.status = "exited";
     registry_write(&entry);
 
-    /* Cleanup (cgroup rmdir, veth, port rules, IP lease, registry entry) is
-     * `mocker rm`'s job (docs/architecture.md section 5) - left in place here
-     * on purpose so a second shell can still `mocker inspect`/`ps` this
-     * container's final state after it exits. */
+    /* State is left for `mocker rm`, so ps/inspect can still show the exited container. */
     printf("MOCKER: container '%s' done (state left in place - run `mocker "
            "rm %s` to clean up).\n",
            name, name);
@@ -299,13 +270,8 @@ static int cmd_stop(int argc, char *argv[])
         return EXIT_SUCCESS;
     }
 
-    /* SIGTERM first, then escalate to SIGKILL after a timeout - not
-     * optional. The registered pid is PID 1 *inside its own PID namespace*
-     * (stage 3), and Linux gives a namespace's init the same
-     * signal-disposition immunity real init has: SIGTERM's default
-     * "terminate" action is not delivered unless the process installed a
-     * handler for it. Most shells don't, so SIGTERM alone would often hang
-     * forever - see docs/architecture.md section 8. */
+    /* SIGTERM, then SIGKILL after a timeout: PID 1 of a PID namespace ignores signals it has
+     * no handler for, so SIGTERM alone often hangs (docs/architecture.md section 8). */
     printf("MOCKER: sending SIGTERM to '%s' (pid %d)...\n", name, (int)rec.pid);
     fflush(stdout);
     kill(rec.pid, SIGTERM);
@@ -362,12 +328,8 @@ static int cmd_rm(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Never touches the rootfs path - see docs/architecture.md section 5:
-     * `mocker run` only pivot_root()s into the user-supplied rootfs path, it
-     * never copies/owns it, so rm only cleans up what Mocker actually
-     * created: cgroup, veth, port rules, IP lease, registry entry. Each step
-     * is attempted even if an earlier one warns, so a container whose setup
-     * only partly succeeded can still be fully removed. */
+    /* Never touches the user-supplied rootfs; only removes what Mocker created. Every step is
+     * attempted even if an earlier one warns, so a partly set-up container can still be removed. */
     int had_warning = 0;
 
     if (cgroup_remove(name) == -1) {
@@ -428,8 +390,7 @@ static int cmd_ps(int argc, char *argv[])
         registry_record_t rec;
         if (registry_read(names[i], &rec) == -1)
             continue;
-        /* Kernel-truth, not the stored status string - see CLAUDE.md
-         * section 10 / docs/architecture.md section 8. */
+        /* Kernel truth, not the stored status string. */
         const char *status = process_alive(rec.pid) ? "running" : "exited";
         printf("%-20s %-8d %-16s %s\n", rec.name, (int)rec.pid, rec.ip, status);
     }
@@ -478,8 +439,7 @@ static int cmd_inspect(int argc, char *argv[])
         printf("port: %d:%d\n", rec.host_port, rec.container_port);
 
     if (alive) {
-        /* Live, kernel-derived state - not re-read from state.json, per
-         * CLAUDE.md section 10. */
+        /* Live kernel state, not state.json. */
         printf("namespaces:\n");
         print_ns("pid", rec.pid, "pid");
         print_ns("mnt", rec.pid, "mnt");
