@@ -127,8 +127,9 @@ Mocker/                       # repo root
 │   ├── nginx/mockerhost.conf # one-time nginx site template
 │   └── README.md
 ├── demo/
-│   ├── leak.c                # not started
-│   ├── forkbomb.c
+│   ├── leak.c                # memory-limit demo (VM-verified)
+│   ├── forkbomb.c            # pids-limit demo (VM-verified)
+│   ├── multi-container.sh    # stage 7: two containers side by side (written, pending VM verification)
 │   └── demo-app/
 ├── docs/
 │   └── mockerhost-design.md  # stage 6 design (scope, request flow, shell-injection safety)
@@ -183,7 +184,7 @@ CLI command MVP ordering (do not implement all commands up front):
 1. ~~Verify `mocker stop`/`rm`/`ps`/`inspect` on live containers~~ — done, VM-verified.
 2. ~~Demo programs~~ — `demo/leak.c` and `demo/forkbomb.c` done, VM-verified: `memory.events`
    `oom_kill`, `pids.events` `max`, host unaffected (`demo/README.md`).
-3. **Stage 7, the multi-container demo** — two containers with independent PIDs, filesystem views,
+3. **Stage 7, the multi-container demo** (`demo/multi-container.sh`, **written on Windows, pending VM verification**) — two containers with independent PIDs, filesystem views,
    hostnames, IPs/ports, and independently enforced cgroup limits; mostly a scripted demonstration
    of what stages 3-6 already provide.
 4. **`mockerhost` teardown** — designed (`docs/mockerhost-teardown-design.md`, approved) and
@@ -192,7 +193,7 @@ CLI command MVP ordering (do not implement all commands up front):
    (`unlinkat()`-based, no symlink following, refuses mounts; never `rm -rf`).
    **Written on Windows, not yet verified on the Lubuntu VM** - verify against kernel state
    (section 10) before marking done.
-5. **Final write-up** — update `README.md` and `docs/`, and the known-limitations section: no user
+5. ~~Final write-up~~ — done: `README.md` (status table + known limitations) and `docs/README.md` updated; no user
    namespace, isolation is namespaces + cgroups only (shared kernel, not a VM boundary).
 
 Deferred (not in the list above): `mocker logs`/`exec`/`stats`.

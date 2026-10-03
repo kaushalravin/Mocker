@@ -13,21 +13,18 @@ SRC = cli/src/main.c \
       cli/src/registry/registry.c \
       cli/src/network/net_setup.c
 
-# Standalone stage-2 cgroups OOM-kill proof - separate from the mocker
-# binary; it exercises cgroups.c on its own, not through `mocker run`.
+# Standalone stage-2 cgroups OOM-kill proof; not part of the mocker binary.
 CGROUP_TEST_TARGET = cgroup-test
 
 CGROUP_TEST_SRC = cli/src/cgroups/cgroups.c \
                   cli/src/cgroups/cgroups_test.c
 
-# mockerhost's control-plane HTTP server - independent binary, independent of
-# cli/src/*.c; it talks to ./mocker only via its CLI (mockerhost/README.md).
+# mockerhost control-plane server; talks to ./mocker only through its CLI.
 MOCKERHOST_TARGET = mockerhost/mockerhost-server
 
 MOCKERHOST_SRC = mockerhost/src/server.c
 
-# mockerhost's teardown helper - the only code that deletes a deploy's rootfs
-# copy (docs/mockerhost-teardown-design.md). Used by mockerhost/teardown.sh.
+# Teardown helper: the only code that deletes a deploy's rootfs copy (used by teardown.sh).
 RMTREE_TARGET = mockerhost/mockerhost-rmtree
 
 RMTREE_SRC = mockerhost/src/rmtree.c
@@ -44,11 +41,7 @@ $(MOCKERHOST_TARGET): $(MOCKERHOST_SRC)
 $(RMTREE_TARGET): $(RMTREE_SRC)
 	$(CC) $(CFLAGS) $(RMTREE_SRC) -o $(RMTREE_TARGET)
 
-# Run the control server from inside mockerhost/ (it reads static/ and
-# clone_and_build.sh relative to its cwd). Override the template rootfs with
-#   make run-mockerhost BASE_ROOTFS=/path/to/rootfs
-# Demo programs (demo/README.md). Built -static: they run inside a minimal
-# BusyBox rootfs that has no libc of its own to link against.
+# Demo programs (demo/README.md), built -static: the BusyBox rootfs has no libc.
 DEMO_TARGETS = demo/leak demo/forkbomb
 
 demo/%: demo/%.c
@@ -58,6 +51,8 @@ demos: $(DEMO_TARGETS)
 
 BASE_ROOTFS ?= /root/test-rootfs
 
+# Runs from mockerhost/ (it reads static/ relative to its cwd). Override the template rootfs:
+#   make run-mockerhost BASE_ROOTFS=/path/to/rootfs
 run-mockerhost: $(MOCKERHOST_TARGET) $(RMTREE_TARGET) $(TARGET)
 	cd mockerhost && sudo MOCKERHOST_BASE_ROOTFS=$(BASE_ROOTFS) ./mockerhost-server
 
