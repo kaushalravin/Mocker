@@ -1,21 +1,12 @@
 #!/bin/sh
-#
-# mockerhost's clone+build+run+register glue. See docs/mockerhost-design.md
-# for the full design, and section 5 specifically for why it's safe to expand
-# $BUILD_CMD/$RUN_CMD below despite being raw user input - the short version:
-# double-quoting keeps each one a single literal argv word on the host; they
-# only become shell syntax once, inside the container ./mocker run creates.
+# mockerhost deploy glue: clone, build and run in a mocker container, register with nginx.
+# Design: docs/mockerhost-design.md. Expanding $BUILD_CMD/$RUN_CMD is safe because they are
+# double-quoted (one literal argv word on the host) and only become shell syntax inside the
+# container (section 5).
 #
 # Usage: clone_and_build.sh <name> <github_url> <build_cmd> <run_cmd> <container_port>
-# Invoked by mockerhost/src/server.c via "/bin/sh clone_and_build.sh ...", not
-# via its own execute bit - see server.c's run_clone_and_build().
-#
-# Prints exactly ONE control line to this process's own stdout when done:
-#   RESULT ok <name> <hostport>
-#   RESULT error <reason>
-# Everything else this script runs (git, ./mocker, the app's own build/run
-# output) is redirected to build.log, never mixed into that stdout - server.c
-# reads this process's stdout expecting only that one line.
+# Prints exactly one stdout line, "RESULT ok <name> <hostport>" or "RESULT error <reason>";
+# everything else goes to build.log because server.c parses that line.
 
 set -u
 
@@ -58,20 +49,14 @@ if [ ! -d "$BASE_ROOTFS" ]; then
     fail "base_rootfs_missing_set_MOCKERHOST_BASE_ROOTFS_or_prepare_root_test-rootfs"
 fi
 
-# Never reuse an existing app directory, and never delete one from here: the
-# only code allowed to delete a rootfs copy is teardown.sh's mockerhost-rmtree
-# (docs/mockerhost-teardown-design.md, CLAUDE.md section 9). This check comes
-# before leasing a port so a refused redeploy can't touch the existing app's
-# lease. A leftover from a failed deploy is cleaned up the same way:
-#   sudo sh mockerhost/teardown.sh <name>
+# Never reuse or delete an existing app dir: only teardown.sh's mockerhost-rmtree deletes
+# (CLAUDE.md section 9). Checked before leasing a port so a refused redeploy can't touch an
+# existing lease. Clean leftovers with: sudo sh mockerhost/teardown.sh <name>
 if [ -e "$APP_ROOTFS" ] || [ -L "$APP_ROOTFS" ]; then
     fail "app_dir_exists_run_teardown_sh_first"
 fi
 
-# --- lease a host port -------------------------------------------------------
-# Same flock()-guarded scan-and-record shape as mocker's own net_alloc_ip()
-# (cli/src/network/net_setup.c) - just in shell, since mockerhost's glue
-# layer is shell by design (docs/mockerhost-design.md section 2).
+# --- lease a host port (flock()-guarded, like mocker's net_alloc_ip()) ---
 lease_port() {
     (
         flock -x 9
@@ -101,16 +86,10 @@ if [ -z "$HOST_PORT" ]; then
     fail "no_free_host_port_in_range"
 fi
 
-# --- give this app its own private rootfs -------------------------------------
-# $BASE_ROOTFS is only a template - mocker run pivot_root()s directly into
-# whatever rootfs path it's given, so if every deploy shared $BASE_ROOTFS
-# verbatim, concurrent containers would be writing into the exact same host
-# directory (and the cloned repo would never be reachable inside any of them,
-# since it's cloned to $MOCKERHOST_ROOT which is unrelated to $BASE_ROOTFS -
-# after pivot_root the container can't see it at all). Instead, each deploy
-# gets its own full copy of the base rootfs (plain `cp -a`, not OverlayFS -
-# CLAUDE.md section 5), with the repo cloned to <rootfs-copy>/app, so `cd
-# /app` inside the container lands exactly on the cloned source.
+# --- give this app its own rootfs ---
+# mocker run pivot_root()s straight into the path it is given, so deploys can't share
+# $BASE_ROOTFS (they'd write into one directory, and the repo would be invisible after the
+# pivot). Each deploy gets a `cp -a` copy (no OverlayFS) with the repo cloned to <copy>/app.
 : > "$LOG_FILE"
 
 if ! cp -a "$BASE_ROOTFS" "$APP_ROOTFS" >> "$LOG_FILE" 2>&1; then
@@ -123,12 +102,8 @@ if ! git clone --depth 1 "$GITHUB_URL" "$APP_ROOTFS/app" >> "$LOG_FILE" 2>&1; th
     fail "git_clone_failed_see_${LOG_FILE}"
 fi
 
-# --- launch inside mocker, in the background ----------------------------------
-# ./mocker run blocks for the container's whole lifetime (it's the foreground
-# supervisor - docs/architecture.md section 2) - background it so this script
-# can register the proxy and return, while the deployed app keeps running.
-# Run from mockerhost/'s own cwd (not repo root) - $MOCKER_BIN is "../mocker"
-# relative to here; $APP_ROOTFS is already an absolute path either way.
+# --- launch in the background ---
+# `mocker run` blocks for the container's lifetime, so background it and carry on.
 echo "DEPLOY: container command = [cd /app && $BUILD_CMD && $RUN_CMD]" >> "$LOG_FILE"
 
 (
@@ -138,7 +113,7 @@ echo "DEPLOY: container command = [cd /app && $BUILD_CMD && $RUN_CMD]" >> "$LOG_
         >> "$LOG_FILE" 2>&1
 ) < /dev/null > /dev/null 2>&1 &
 
-# --- confirm the container actually started ------------------------------------
+# --- confirm it started ---
 STATE_FILE="/var/lib/mocker/containers/$NAME/state.json"
 waited=0
 while [ ! -f "$STATE_FILE" ] && [ "$waited" -lt "$STATE_TIMEOUT_S" ]; do
@@ -151,13 +126,9 @@ if [ ! -f "$STATE_FILE" ]; then
     fail "container_did_not_start_within_${STATE_TIMEOUT_S}s_see_${LOG_FILE}"
 fi
 
-# --- register with the reverse proxy ---------------------------------------------
-# Proxy straight to the container's own IP on the mocker0 bridge, NOT to
-# 127.0.0.1:$HOST_PORT. mocker's --port rule is a DNAT in nat/OUTPUT, and a
-# connection nginx opens to 127.0.0.1 keeps source 127.0.0.1 after the DNAT,
-# which the kernel won't route out over mocker0 (and the container couldn't
-# reply to) - it just hangs, so nginx reports a 504. The host can reach
-# 10.200.0.x directly over the bridge with no NAT involved.
+# --- register with nginx ---
+# Proxy to the container's own IP, not 127.0.0.1:$HOST_PORT: a connection through the --port
+# OUTPUT DNAT keeps its loopback source and hangs (504).
 CONTAINER_IP="$(sed -n 's/.*"ip": *"\([0-9.]*\)".*/\1/p' "$STATE_FILE")"
 if [ -z "$CONTAINER_IP" ]; then
     fail "could_not_read_container_ip_from_state_json"

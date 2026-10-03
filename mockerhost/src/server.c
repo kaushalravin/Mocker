@@ -12,27 +12,16 @@
 #include <time.h>
 #include <unistd.h>
 
-/*
- * mockerhost's control-plane HTTP server: serves the deploy form and, on
- * submit, hands off to clone_and_build.sh. See docs/mockerhost-design.md for
- * the full design - in particular section 5 for exactly where user-submitted
- * build/run commands are and are not allowed to become shell code.
- *
- * Raw sockets, hand-rolled request parsing - no HTTP library, same
- * syscall-oriented posture as the rest of this project (CLAUDE.md section 7).
- * Single-threaded, sequential accept() loop - deliberate, see
- * docs/mockerhost-design.md section 7.
- */
+/* mockerhost control-plane HTTP server: serves the deploy form and hands submissions to
+ * clone_and_build.sh. Raw sockets, single-threaded accept() loop. User-submitted commands never
+ * become host shell code (docs/mockerhost-design.md sections 5 and 7). */
 
 #define LISTEN_PORT 8080
 #define REQUEST_BUF_MAX 8192
 #define FIELD_MAX 512
 #define NAME_MAX_LEN 64
 
-/* mockerhost-server is meant to be launched from inside mockerhost/ (see
- * mockerhost/README.md) - these paths are relative to that working
- * directory, the same "run from a fixed known directory" convention the top
- * -level ./mocker binary itself already uses. */
+/* Paths are relative to mockerhost/, the directory the server must be launched from. */
 #define STATIC_INDEX_PATH "static/index.html"
 #define CLONE_AND_BUILD_SCRIPT "clone_and_build.sh"
 
@@ -60,8 +49,7 @@ static void url_decode(const char *in, char *out, size_t out_size)
     out[oi] = '\0';
 }
 
-/* Finds "key=value" in an application/x-www-form-urlencoded body and
- * url_decode()s the value into out. Returns -1 if the key isn't present. */
+/* Finds "key=value" in a urlencoded body and url_decode()s it into out; -1 if absent. */
 static int extract_form_field(const char *body, const char *key, char *out, size_t out_size)
 {
     size_t key_len = strlen(key);
@@ -90,9 +78,7 @@ static int extract_form_field(const char *body, const char *key, char *out, size
     return -1;
 }
 
-/* Reads one HTTP request: headers up to "\r\n\r\n", then exactly
- * Content-Length bytes of body. Not a general-purpose parser - just enough
- * to read a GET with no body or a POST with a url-encoded form body. */
+/* Reads one HTTP request: headers up to a blank line, then Content-Length bytes of body. */
 static int read_request(int fd, http_request_t *req)
 {
     char buf[REQUEST_BUF_MAX];
@@ -176,10 +162,7 @@ static void serve_index(int fd)
     send_response(fd, 200, "OK", "text/html", body);
 }
 
-/* Derives a mocker-valid container name (^[a-zA-Z0-9_-]{1,64}$, see
- * docs/filesystem-safety.md) from the repo's own name in the URL, plus a
- * time-based suffix so redeploying the same repo doesn't collide with the
- * still-running earlier one. */
+/* Derives a valid container name from the repo name plus a time suffix, so redeploys don't collide. */
 static void generate_app_name(const char *github_url, char *out, size_t out_size)
 {
     const char *slash = strrchr(github_url, '/');
@@ -212,10 +195,8 @@ static void generate_app_name(const char *github_url, char *out, size_t out_size
 static int valid_github_url(const char *url)
 {
     const char *prefix = "https://github.com/";
-    /* Restricting to this exact prefix, not just "contains github.com",
-     * rules out git transport schemes (ext::, file://, ...) that can
-     * themselves execute commands, and guarantees the value can never start
-     * with '-' - see docs/mockerhost-design.md section 4. */
+    /* An exact prefix (not "contains github.com") blocks git transports like ext:: and file://,
+     * and a leading '-' (docs/mockerhost-design.md section 4). */
     return strncmp(url, prefix, strlen(prefix)) == 0 && strlen(url) > strlen(prefix) &&
            strlen(url) < FIELD_MAX;
 }
@@ -232,12 +213,8 @@ static int valid_port(const char *s)
     return v >= 1 && v <= 65535;
 }
 
-/*
- * Runs clone_and_build.sh with each field as its own argv element - never a
- * host shell string built from these values (docs/mockerhost-design.md
- * section 2/5). Reads the script's stdout (reserved for exactly one
- * "RESULT ..." control line - see the script itself) back through a pipe.
- */
+/* Runs clone_and_build.sh with each field as its own argv element, never a shell string
+ * (docs/mockerhost-design.md sections 2 and 5). Its stdout carries one "RESULT ..." line. */
 static int run_clone_and_build(const char *name, const char *github_url, const char *build_cmd,
                                 const char *run_cmd, const char *container_port,
                                 char *result_line, size_t result_line_size)
@@ -263,10 +240,7 @@ static int run_clone_and_build(const char *name, const char *github_url, const c
         dup2(pipefd[1], STDOUT_FILENO);
         close(pipefd[1]);
 
-        /* Invoked via /bin/sh rather than execvp()-ing the script path
-         * directly, so this doesn't depend on the file's own executable bit
-         * surviving a Windows-authored git commit onto the Linux VM - only
-         * read permission is needed. */
+        /* Via /bin/sh so a lost executable bit (Windows-authored commit) doesn't matter. */
         char *argv[] = {"/bin/sh",           CLONE_AND_BUILD_SCRIPT, (char *)name,
                          (char *)github_url, (char *)build_cmd,      (char *)run_cmd,
                          (char *)container_port, NULL};
@@ -347,15 +321,11 @@ static void handle_deploy(int fd, const char *body)
 
     char response_body[1024];
     if (strcmp(status, "ok") == 0) {
-        /* detail is "<name> <hostport>" per clone_and_build.sh's contract -
-         * only the name is needed here, the proxy path doesn't expose the
-         * host port to the browser at all. */
+        /* detail is "<name> <hostport>"; only the name is needed. */
         char deployed_name[NAME_MAX_LEN + 8] = "";
         sscanf(detail, "%63s", deployed_name);
-        /* This page is served from :8080 (the control plane), but the app is
-         * proxied by nginx on port 80 - a relative href would resolve against
-         * :8080 and 404. Build the link from the browser's own hostname with
-         * no port (= 80) instead. deployed_name is already a validated slug. */
+        /* This page is on :8080 but nginx serves the app on port 80, so build the link from
+         * the browser's hostname without a port. */
         snprintf(response_body, sizeof(response_body),
                  "<html><body><h1>Deployed</h1><p>Live at "
                  "<a id=\"l\" href=\"#\">(enable JavaScript, or open "

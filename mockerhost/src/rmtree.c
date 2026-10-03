@@ -1,28 +1,14 @@
 #define _GNU_SOURCE
 
-/*
- * mockerhost-rmtree <name> - deletes /var/lib/mockerhost/apps/<name>/ and
- * everything under it, and nothing else.
- *
- * This is the one place in the project that recursively deletes a tree full of
- * untrusted content (a cloned repo plus whatever its build step produced), so
- * it follows docs/filesystem-safety.md to the letter - see
- * docs/mockerhost-teardown-design.md section 4 for the reasoning:
- *
- *   - The only input is an app name. The root path is a compile-time constant;
- *     there is no path argument and no environment override.
- *   - Every step is openat()/fstatat()/unlinkat() relative to a directory fd,
- *     with O_NOFOLLOW / AT_SYMLINK_NOFOLLOW. A symlink in the tree is removed
- *     as a link and never opened, so one pointing at /, /etc or the host's
- *     real files cannot redirect the delete.
- *   - It refuses if anything is mounted at or under the target, and aborts if
- *     it ever crosses onto another device (st_dev), because deleting "through"
- *     a mount would delete whatever the mount exposes.
- *   - Any error aborts the whole operation and leaves the rest in place:
- *     a partial cleanup that can be re-run beats guessing.
- *
- * No rm, no system(), no popen(), no shell.
- */
+/* mockerhost-rmtree <name>: deletes /var/lib/mockerhost/apps/<name>/ and nothing else.
+ * The one recursive delete over untrusted content, so it follows docs/filesystem-safety.md
+ * (reasoning: docs/mockerhost-teardown-design.md section 4):
+ *   - The only input is an app name; the root is a compile-time constant.
+ *   - Everything is openat()/fstatat()/unlinkat() on directory fds with O_NOFOLLOW, so
+ *     symlinks are unlinked, never followed.
+ *   - It refuses mounts under the target and aborts if it crosses devices (st_dev).
+ *   - Any error aborts, leaving a partial cleanup that can be re-run.
+ * No rm, system(), popen() or shell. */
 
 #include <dirent.h>
 #include <errno.h>
@@ -59,8 +45,7 @@ static int valid_name(const char *name)
     return 1;
 }
 
-/* Belt-and-braces on top of the realpath/O_NOFOLLOW checks in main(): the
- * target must never be, or be an ancestor of, a host-critical directory. */
+/* Defense in depth: the target must never be, or contain, a host-critical directory. */
 static int path_is_forbidden(const char *path)
 {
     static const char *const forbidden[] = {"/",    "/etc", "/home",         "/usr",
@@ -73,14 +58,9 @@ static int path_is_forbidden(const char *path)
     return 0;
 }
 
-/*
- * Refuses if any mount in the host's mount table is at or below `target`.
- * Under normal operation there are none: mocker makes "/" MS_REC|MS_PRIVATE
- * before bind-mounting the rootfs onto itself, so those mounts exist only in
- * the container's own mount namespace and never show up here. If that
- * assumption is ever wrong, deleting would remove files from whatever is
- * mounted there, so this fails closed.
- */
+/* Refuses if the host's mount table has any mount at or below `target`. None are expected
+ * (mocker's mounts stay in the container's namespace), but deleting through a mount would
+ * delete whatever it exposes, so fail closed. */
 static int check_no_mounts(const char *target)
 {
     FILE *f = fopen("/proc/self/mountinfo", "r");
@@ -93,9 +73,8 @@ static int check_no_mounts(const char *target)
     char line[8192];
     int rc = 0;
     while (fgets(line, sizeof(line), f) != NULL) {
-        /* mountinfo: "id parent maj:min root mountpoint options ..." - the
-         * 5th field is the mount point, with spaces octal-escaped, so
-         * whitespace splitting is safe and a prefix compare still works. */
+        /* mountinfo field 5 is the mount point; spaces are octal-escaped, so splitting on
+         * whitespace is safe. */
         char mountpoint[PATH_MAX];
         if (sscanf(line, "%*s %*s %*s %*s %4095s", mountpoint) != 1)
             continue;
@@ -112,11 +91,8 @@ static int check_no_mounts(const char *target)
     return rc;
 }
 
-/*
- * Deletes everything inside the directory open as `fd` (not the directory
- * itself). Takes ownership of fd and closes it. `dev` is the device the
- * app directory lives on; any subdirectory on a different device aborts.
- */
+/* Deletes everything inside the directory open as fd (not the directory itself) and takes
+ * ownership of fd. A subdirectory on a different device than `dev` aborts. */
 static int remove_contents(int fd, dev_t dev, int depth, const char *path)
 {
     if (depth > MAX_DEPTH) {
@@ -134,8 +110,7 @@ static int remove_contents(int fd, dev_t dev, int depth, const char *path)
 
     int rc = 0;
     for (;;) {
-        /* Deleting while iterating can make readdir() skip entries, so keep
-         * making passes from the top until one finds nothing left. */
+        /* Deleting while iterating can make readdir() skip entries; repeat passes until empty. */
         rewinddir(d);
         int seen = 0;
         struct dirent *e;
@@ -174,8 +149,8 @@ static int remove_contents(int fd, dev_t dev, int depth, const char *path)
                     rc = -1;
                     break;
                 }
-                /* The entry could have been swapped between fstatat() and
-                 * openat(); the opened fd must be the very inode we looked at. */
+                /* The entry may have been swapped between fstatat() and openat(); the opened
+                 * fd must be the inode we looked at. */
                 struct stat sst;
                 if (fstat(sub, &sst) == -1 || sst.st_dev != dev || sst.st_ino != st.st_ino) {
                     fprintf(stderr, "rmtree: refusing: '%s' changed while being opened\n",
@@ -195,8 +170,8 @@ static int remove_contents(int fd, dev_t dev, int depth, const char *path)
                 }
                 dirs_removed++;
             } else {
-                /* Regular file, symlink, device node, fifo, socket: unlink the
-                 * entry itself. A symlink is removed as a link, never followed. */
+                /* Files, symlinks, devices, fifos, sockets: unlink the entry itself; links
+                 * are never followed. */
                 if (unlinkat(dirfd(d), e->d_name, 0) == -1) {
                     fprintf(stderr, "rmtree: unlink '%s': %s\n", child, strerror(errno));
                     rc = -1;
@@ -233,8 +208,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* /var/lib/mockerhost/apps must be the real directory, not a symlink to
-     * somewhere else - otherwise "apps/<name>" could be anywhere. */
+    /* apps/ must be a real directory, not a symlink; otherwise apps/<name> could be anywhere. */
     char *real_apps = realpath(APPS_DIR, NULL);
     if (real_apps == NULL) {
         if (errno == ENOENT) {
