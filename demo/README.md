@@ -85,6 +85,31 @@ Pass if `pids.current` is at the limit, `pids.events` shows `max` > 0, and the h
 unaffected. After the hold, `forkbomb` exits; check `mocker ps` shows `exited`, then
 `sudo ./mocker rm bomb1`.
 
+## Demo 3: two containers side by side (`multi-container.sh`)
+
+Stage 7. Launches `alpha` (64 MB) and `beta` (128 MB) and proves from kernel state that they have
+different PIDs, namespaces, hostnames, filesystems, IPs and cgroup limits, then lets `alpha` leak
+until its own limit kills it while `beta` keeps running. Needs `leak` already in
+`/root/test-rootfs/bin/` (see the build section above). The script copies that rootfs once to
+`/root/demo-rootfs-alpha` and `/root/demo-rootfs-beta` (one rootfs per container) and never
+deletes anything.
+
+**HOST COMMAND (runs `mocker` itself, takes ~30 s):**
+
+```bash
+cd ~/Mocker && git pull && make && make demos
+sudo bash demo/multi-container.sh
+```
+
+Pass if:
+- Section 2: the `pid`/`mnt`/`uts`/`net` inodes are three different values per row.
+- Section 3: three different hostnames (host, `alpha`, `beta`).
+- Section 4: `/secret` exists only in alpha's rootfs.
+- Section 6: `memory.max`/`pids.max` differ (67108864/20 vs 134217728/50).
+- Section 7: alpha `oom_kill 1`, beta `oom_kill 0`, beta still alive.
+
+The script stops and removes both containers when it finishes (also on Ctrl-C).
+
 ## Optional: prove the limits are what stopped it
 
 Re-run each demo **without** the flag (`--mem-mb` or `--pids` omitted) *only* to see the safety
