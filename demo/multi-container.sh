@@ -1,11 +1,8 @@
 #!/bin/bash
-# Stage 7: two mocker containers side by side, proven isolated by the kernel.
-# HOST script - run as root from the repo root on the Lubuntu VM:
-#     sudo ./demo/multi-container.sh
-#
-# Everything shown comes from /proc, /sys/fs/cgroup and nsenter, not from
-# mocker's own output (CLAUDE.md section 10). Nothing here deletes files:
-# the two rootfs copies are created once and reused on later runs.
+# Stage 7: two mocker containers side by side, proven isolated by kernel state (/proc,
+# /sys/fs/cgroup, nsenter), not mocker's own output. HOST script, run as root from the repo root:
+#     sudo bash demo/multi-container.sh
+# Deletes nothing: the two rootfs copies are created once and reused.
 
 set -u
 
@@ -23,8 +20,7 @@ CG=/sys/fs/cgroup/mocker
 say() { printf '\n=== %s\n' "$*"; }
 state_field() { sed -n "s/.*\"$2\": *\"\{0,1\}\([^\",]*\)\"\{0,1\}.*/\1/p" "/var/lib/mocker/containers/$1/state.json"; }
 
-# Each container needs its OWN rootfs: mocker run pivot_root()s straight into
-# the path it is given, so two containers on one path would share one filesystem.
+# Each container needs its own rootfs: mocker run pivot_root()s into the path it is given.
 for r in "$ROOTFS_A" "$ROOTFS_B"; do
     [ -d "$r" ] || cp -a "$BASE_ROOTFS" "$r"
 done
@@ -39,10 +35,9 @@ cleanup() {
 trap cleanup EXIT
 cleanup # clear leftovers from an earlier run
 
-# --- launch -----------------------------------------------------------------
-# alpha: 64 MB. Prints what it sees, idles 20s so we can inspect it, then
-#        leaks until its own memory limit kills it.
-# beta:  128 MB, just idles. It must survive alpha's death.
+# --- launch ---
+# alpha (64 MB): prints what it sees, idles 20s for inspection, then leaks until OOM-killed.
+# beta (128 MB): idles; must survive alpha's death.
 say "HOST COMMAND: launching alpha (64 MB, 20 pids) and beta (128 MB, 50 pids)"
 "$MOCKER" run --name alpha --mem-mb 64 --pids 20 "$ROOTFS_A" -- sh -c \
     'echo "alpha sees: hostname=$(hostname) my-pid=$$"; echo "alpha sees pids: $(echo /proc/[0-9]*)"; echo alpha > /secret; sleep 20; exec /bin/leak' \

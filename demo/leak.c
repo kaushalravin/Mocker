@@ -1,22 +1,9 @@
 #define _GNU_SOURCE
 
-/*
- * Deliberate memory leak, to prove memory.max is enforced by the kernel.
- *
- * Allocates 1 MB at a time and touches every page, so the memory is actually
- * resident (an untouched malloc() isn't charged to the cgroup yet). It never
- * frees anything. Inside a container started with `--mem-mb <n>`, the cgroup's
- * memory.max is the wall: once the group is over it and nothing can be
- * reclaimed (mocker also sets memory.swap.max=0), the kernel's cgroup OOM
- * killer SIGKILLs a process in the group - this one.
- *
- * It prints its own progress, but that's just narration. The proof is on the
- * host: memory.events (oom_kill) and the kernel log - see demo/README.md.
- *
- * Bounded on purpose: it stops itself at LEAK_SAFETY_CAP_MB so that running it
- * on the host by mistake can't eat all of the VM's RAM. Exiting on its own
- * means no limit stopped it, which the message says out loud.
- */
+/* Deliberate memory leak: allocates and touches 1 MB at a time until memory.max gets it
+ * OOM-killed. The proof is on the host (memory.events oom_kill, kernel log), not this output.
+ * Stops itself at LEAK_SAFETY_CAP_MB so a mistaken host run can't eat the VM's RAM; reaching
+ * the cap means no limit worked. */
 
 #include <stdio.h>
 #include <stdlib.h>

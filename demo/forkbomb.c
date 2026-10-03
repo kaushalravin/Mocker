@@ -1,21 +1,9 @@
 #define _GNU_SOURCE
 
-/*
- * Deliberate fork-until-refused, to prove pids.max is enforced by the kernel.
- *
- * Keeps calling fork(); every child just sleeps. Inside a container started
- * with `--pids <n>`, the cgroup's pids.max makes fork() fail with EAGAIN once
- * the group holds n processes, and this program reports how many children it
- * got before that happened. The kernel's own evidence is on the host:
- * pids.events's "max" counter counts the forks it refused - see demo/README.md.
- *
- * This is a linear fork loop, not a true exponential bomb (children don't
- * fork again). That's deliberate: it exercises exactly the same limit, but
- * can't take down the VM if it's run on the host by mistake - it stops at
- * FORK_SAFETY_CAP children, and every child exits by itself after
- * CHILD_LIFETIME_SEC via alarm(). If the cap is reached, no limit stopped it,
- * and the message says so.
- */
+/* Deliberate fork-until-refused: children just sleep, so pids.max makes fork() fail with
+ * EAGAIN. The proof is pids.events "max" on the host. Linear on purpose (children don't fork
+ * again), capped at FORK_SAFETY_CAP, and each child exits after CHILD_LIFETIME_SEC, so a
+ * mistaken host run is harmless. */
 
 #include <errno.h>
 #include <signal.h>
@@ -58,8 +46,7 @@ int main(void)
            children, CHILD_LIFETIME_SEC);
     sleep(CHILD_LIFETIME_SEC);
 
-    /* Reap the children so the container exits cleanly instead of leaving
-     * zombies behind. They've either expired by now or are about to. */
+    /* Reap the children so the container exits without zombies. */
     while (wait(NULL) > 0)
         ;
     return children == FORK_SAFETY_CAP ? EXIT_FAILURE : EXIT_SUCCESS;
