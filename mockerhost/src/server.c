@@ -23,6 +23,7 @@
 
 /* Paths are relative to mockerhost/, the directory the server must be launched from. */
 #define STATIC_INDEX_PATH "static/index.html"
+#define STATIC_CSS_PATH "static/style.css"
 #define CLONE_AND_BUILD_SCRIPT "clone_and_build.sh"
 
 typedef struct {
@@ -144,12 +145,14 @@ static void send_response(int fd, int status_code, const char *status_text,
     write(fd, body, body_len);
 }
 
-static void serve_index(int fd)
+/* Serves one fixed file from static/. Callers pass a compile-time path, never anything taken from
+ * the request, so there is no path-traversal surface. */
+static void serve_static_file(int fd, const char *path, const char *content_type)
 {
-    FILE *f = fopen(STATIC_INDEX_PATH, "r");
+    FILE *f = fopen(path, "r");
     if (f == NULL) {
         send_response(fd, 500, "Internal Server Error", "text/plain",
-                      "mockerhost: static/index.html not found - run mockerhost-server "
+                      "mockerhost: static file not found - run mockerhost-server "
                       "from inside the mockerhost/ directory\n");
         return;
     }
@@ -159,7 +162,7 @@ static void serve_index(int fd)
     body[len] = '\0';
     fclose(f);
 
-    send_response(fd, 200, "OK", "text/html", body);
+    send_response(fd, 200, "OK", content_type, body);
 }
 
 /* Derives a valid container name from the repo name plus a time suffix, so redeploys don't collide. */
@@ -387,7 +390,9 @@ int main(void)
         }
 
         if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/") == 0)
-            serve_index(client_fd);
+            serve_static_file(client_fd, STATIC_INDEX_PATH, "text/html");
+        else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/style.css") == 0)
+            serve_static_file(client_fd, STATIC_CSS_PATH, "text/css");
         else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/deploy") == 0)
             handle_deploy(client_fd, req.body);
         else
